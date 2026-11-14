@@ -1,8 +1,14 @@
 # EDA_limpio.exe
 
 ```
-0799387e23cadd355888bd712143f2d5   EDA_limpio.exe   (6.139.904 bytes)
+ba6f91dbb89faf400bc73612295ae5ef   EDA_limpio.exe   (6.139.904 bytes)
 ```
+
+> ⚠ **Rama `exe-sin-asprotect`, todavía sin mudanza.** Éste es el exe NUEVO: 624 de las 694 llamadas que
+> ASProtect desarmó, repuestas, contra 511 del de antes (`0799387e…`). Las 70 que faltan están en código
+> que nadie llama, y además corrige 10 llamadas que el de antes tenía mal (`documentacion/MEDICIONES.md`
+> §56). Prod y el launcher siguen con `0799387e` hasta que se anuncie el cambio. El server ya conoce la
+> clave de los dos (`herramientas/paquete_broker.py`, `CLAVES_FIJAS`).
 
 Es el `EDA.exe` de 2009 (md5 `f0b12e6cddf3efdd0676b6491efe46be`) **desempacado** (sin
 ASProtect) y **sin GameGuard**. Es el que abre `py jugar.py` por defecto: en algunas PCs el
