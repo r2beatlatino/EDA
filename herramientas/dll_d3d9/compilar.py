@@ -21,6 +21,10 @@ SALIDA = os.path.join(RAIZ, "_trabajo", "dll")
 JUEGO = os.path.join(RAIZ, "_trabajo", "juego")
 ZIG = os.environ.get("ZIG") or os.path.join(os.path.expanduser("~"), "Desktop", "Proyecto qq", "_taller", "_zig",
                                              "zig-x86_64-windows-0.16.0", "zig.exe")
+# (o el que baja herramientas/dll_d3d9/bajar_zig.py a _trabajo/zig/, para quien no tiene el de R2Beat)
+_ZIG_AQUI = os.path.join(RAIZ, "_trabajo", "zig", "zig-x86_64-windows-0.16.0", "zig.exe")
+if not os.environ.get("ZIG") and not os.path.isfile(ZIG) and os.path.isfile(_ZIG_AQUI):
+    ZIG = _ZIG_AQUI
 INI = """; eda_d3d9.ini — los ajustes del d3d9.dll de EDA (herramientas/dll_d3d9, ver su LEEME.md)
 ; Cada BLOQUE se prende o se apaga solo. Por defecto: LO MÍNIMO (tope de cuadros + server) y la caja negra.
 ; (Las líneas que empiezan con «;» son comentarios.)
@@ -40,6 +44,8 @@ server=
 tope_fps=120
 ; 1 = «FPS 120» arriba a la izquierda
 mostrar_fps=0
+; 1 = el ANILLO de vértices: el arreglo del «lag» del lobby y la sala (MEDICIONES §42-43). 0 = apagado
+anillo=1
 
 [general]
 ; 0 = ni siquiera lo de abajo ni el tope: el video y la red del juego como en 2009 (quedan el server,
@@ -100,9 +106,18 @@ letras_32=0
 # PARCHES DE MAZINO (PR #1, #5, #9)
 #####################################################################
 [mazino]
-; (todavía ninguno en la dll: su arreglo de la REGIÓN —el juego moría en los Windows en español— ya está
-;  ADENTRO de EDA_limpio.exe, MEDICIONES §37; los demás son del server)
-activo=0
+; ★ (14-nov) lo que antes hacía Frida (herramientas/eda_original.py), ahora en la dll: llega a todos con el
+;   launcher. Prendido por defecto; cada uno se apaga solo (0). MEDICIONES §57
+activo=1
+; 1 = los botones Clan / Messenger / Options de arriba (el cliente de 2009 no los une a nada): en el lobby y en
+;     Shop / Inventory / Refinery / Skill mandan /clan, /messenger, /opciones al server
+botones=1
+; 1 = Ctrl+clic en la bolsa marca VARIAS casillas (con la selección del propio juego); «Sell» vende todas
+seleccion_multiple=1
+; 1 = EDA no se pausa al cambiar de ventana, y no centra ni encierra el mouse si no está al frente
+foco=1
+; 1 = el botón Options abre la ventana de opciones de la dll (anda igual en local y en multijugador)
+opciones=1
 """
 
 
@@ -114,7 +129,7 @@ def compilar():
     if not os.path.isfile(ZIG):
         raise SystemExit("⛔ no encuentro Zig 0.16.0: %s (se puede indicar con la variable ZIG)" % ZIG)
     os.makedirs(SALIDA, exist_ok=True)
-    for f in ("eda_d3d9.c", "d3d9.def"):
+    for f in ("eda_d3d9.c", "eda_opciones.c", "d3d9.def"):
         shutil.copy(os.path.join(AQUI, f), SALIDA)
     dll = os.path.join(SALIDA, "d3d9.dll")
     if os.path.exists(dll):
