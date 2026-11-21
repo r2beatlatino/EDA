@@ -47,8 +47,14 @@ PUNCH_PUERTO = int(os.environ.get("EDA_PUNCH_PUERTO") or 25001)   # `herramienta
 #     la privada si comparten IP pública) y su MAC real como identidad; el relay sólo para quien no
 #     mandó su MAC (un juego lanzado sin comillas). La latencia es la de ellos dos, no la del server.
 #   "relay" = todo pasa por el relay del server (lo de antes; para NAT que no se dejan atravesar).
-P2P = os.environ.get("EDA_P2P", "directo")
-PUNCH_MAPA = os.path.join(ESTADO, "punch.json")   # conexión → [IP, puerto] que vio el punch (relay_udp.py)
+#   ★ (21-nov) "auto" = por PAREJA y el mismo camino en los dos sentidos: misma casa → las privadas; las dos
+#     públicas confiables (su 0x3006 de esta sesión y su 0x3002 por el mismo puerto) → directo; si no → relay.
+#     (El anfitrión nunca manda su 0x3006: con él, relay.) Ver `servidor/relay.ruta`.
+# ⚠ (21-nov) docker-compose pasa la variable SIEMPRE (vacía si el .env no la tiene): vacía = "directo", lo de
+#   siempre. Un valor que no es ninguno de los tres también queda en "directo" (y se avisa al arrancar).
+P2P_PEDIDO = (os.environ.get("EDA_P2P") or "").strip().lower()
+P2P = P2P_PEDIDO if P2P_PEDIDO in ("directo", "relay", "auto") else "directo"
+PUNCH_MAPA = os.path.join(ESTADO, "punch.json")   # conexión → [IP, puerto, hora] que vio el punch (relay_udp.py; ★ 21-nov: con hora)
 # ★ P2P ENTRE CASAS (MEDICIONES §53, servidor/nat.py): cada juego se presenta al relay al conectarse
 #   (0x0607 → su 0x3002) y el server le dice su dirección PÚBLICA (0x0609), como el original. Así el
 #   server sabe la pública de TODOS (el anfitrión no pasa por el punch) y les da la del otro: los
@@ -78,7 +84,9 @@ PREFIJO_CUENTA = os.environ.get("EDA_PREFIJO_CUENTA") or "r2b_"
 #                 juego (el cliente ya la muestra vacía: es lo que pasa cuando alguien los borra todos)
 CUENTA_NUEVA = os.environ.get("EDA_CUENTA_NUEVA") or "personaje"
 PORTERO_EMISOR = "r2beat-portero"
-PORTERO_AUDIENCIA = "eda"
+# ★ (21-nov) el `aud` del pase que acepta ESTE server: `eda` (prod) o `eda-prueba` (el server de prueba, con su pase
+#   propio en Cuenta Eñeños: así una cuenta con acceso a uno no entra sola al otro, y un pase de prueba no abre prod)
+PORTERO_AUDIENCIA = (os.environ.get("EDA_PORTERO_AUDIENCIA") or "eda").strip()
 PORTERIA = os.path.join(ESTADO, "porteria.db")              # los tickets dados y los pases ya usados
 TICKET_HORAS = float(os.environ.get("EDA_TICKET_HORAS") or 12)
 
@@ -90,6 +98,13 @@ MAX_JUGADORES = int(os.environ.get("EDA_MAX_JUGADORES") or 100)
 # ★ «al menos por ahora, directo nivel 25» (El tester, 12-nov): el piso de nivel de cada personaje
 #   (servidor/cuentas.py · con_nivel_inicial). 0 = sin piso (las pruebas lo usan así)
 NIVEL_INICIAL = int(os.environ.get("EDA_NIVEL_INICIAL") or 25)
+
+# ★ (20-nov) LA PUERTA INTERNA DEL PANEL del Coordinador Eñeños (servidor/panel.py, el «contrato del panel v1»):
+#   R2_CUENTAS_FICHA_INTERNA es la ficha que tiene que traer cada pedido (la MISMA variable que el resto del conjunto
+#   Eñeños). Vacía = la puerta no existe (todo 404). EDA_ENTORNO dice qué server es (prod, prueba, ensayo…).
+FICHA_INTERNA = (os.environ.get("R2_CUENTAS_FICHA_INTERNA") or "").strip()
+ENTORNO = os.environ.get("EDA_ENTORNO") or "local"
+PANEL_AUDITORIA = os.path.join(ESTADO, "panel_auditoria.jsonl")   # cada cambio pedido por el panel, con quién
 
 # ★ para probar a mano: lo que se deje en este archivo ([["1069", "00"], …]) sale con el próximo
 #   «estoy vivo» (0x1001), y el archivo se borra

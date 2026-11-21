@@ -4,6 +4,7 @@ y el premio. Y el «estoy vivo» (0x1001), que es por donde sale lo pendiente po
 import json
 import os
 import random
+import re
 import struct
 import time
 
@@ -13,6 +14,25 @@ from servidor.estado import SALAS, partida, numero
 from servidor.cuentas import guardar, nivel
 from servidor.datos import ESCENARIOS, NADA, PRECIOS, RANKRATE, puntos_de, tabla_premios
 from servidor.objetos import inventario, libre_en_bolsa, registro_item, serial_nuevo
+
+
+_EXISTEN = None
+
+
+def existe_en_cliente(tipo):
+    """★ (20-nov) ¿el cliente conoce ese tipo de ítem (ItemTypeList.xml)? StageReward.xml pide ítems que el
+    cliente no define: el 26004 en las 17 variantes Normal 1032 … 1202 (datos/ del repo) y 26004–26006 en las 47
+    variantes Normal 1032 … 1502 (el XML que guardó el juego del dueño). ItemTypeList.xml está completo (sus
+    propios NUM: 192 equipos, 60 piedras, 6 pociones = 26001–26003 y 26101–26103, 46 libros, 4 varios = 308), la
+    tienda (Product.xml) no los vende y el exe no los nombra: no se inventan. Se saltean y el resto del premio
+    (oro, EXP, los demás ítems) sigue igual. Sin el XML, se da por bueno (como antes)."""
+    global _EXISTEN
+    if _EXISTEN is None:
+        try:
+            _EXISTEN = {int(i) for i in re.findall(rb'<ITEMTYPE ID="(\d+)"', open(config.TIPOS_XML, "rb").read())}
+        except OSError:
+            _EXISTEN = set()
+    return not _EXISTEN or tipo in _EXISTEN
 
 
 def dar_premio(c, escenario, elegir=None):
@@ -29,7 +49,7 @@ def dar_premio(c, escenario, elegir=None):
             c["plata"] += dato
         elif tipo_p == 1:
             c["exp"] += dato
-        elif tipo_p == 2 and dato != NADA:
+        elif tipo_p == 2 and dato != NADA and existe_en_cliente(dato):
             try:
                 # un libro de habilidad llega SIN verificar (para eso está el Skill Check Scroll)
                 cas = libre_en_bolsa(inv)
@@ -49,7 +69,7 @@ def premio_de_carta(escenario):
     ítems (Type 2) que no son «None» (40071); 🟡 sin pesos, el XML no trae probabilidades.
     Devuelve (tipo de ítem, cantidad) o None si la stage no tiene ítems."""
     _, lista = tabla_premios().get(escenario, (0, []))
-    items = [(d, max(1, n)) for t, d, n in lista if t == 2 and d != NADA]
+    items = [(d, max(1, n)) for t, d, n in lista if t == 2 and d != NADA and existe_en_cliente(d)]
     return random.choice(items) if items else None
 
 
@@ -82,6 +102,11 @@ def termino_su_stage(s, conexion):
     if not s:
         return
     s.setdefault("en_stage", set()).discard(conexion)
+    if s.get("partida_id") and s.get("jugando"):
+        quedan = sorted(s["en_stage"] & set(s["miembros"]))
+        print("partida %s: #%s terminó su stage%s" % (s["partida_id"], conexion,
+              " · siguen en la stage: %s" % ", ".join("#%s" % m for m in quedan) if quedan else " · ya no queda nadie"),
+              flush=True)
     if not (s["en_stage"] & set(s["miembros"])):
         if s.get("jugando"):
             # ★ (Punto 3, 18-nov 12:58) el lobby se ENTERA de que vuelve a «Waiting» (con el próximo tick, como
@@ -91,6 +116,8 @@ def termino_su_stage(s, conexion):
             VIVO.LISTA_CAMBIO = True
         s["jugando"] = False
         s.setdefault("cargados", set()).clear()
+        s.pop("largada", None)
+        s.pop("carga_desde", None)
 
 
 def dejar_la_sala(p, conexion):
@@ -163,19 +190,62 @@ def termino_de_cargar(cmd, cuerpo, conexion, c, p):
         return [(0x106C, struct.pack("<BB", i, i), 0, n) for n in destinos for i in total]
     # ★ con varios: la largada (0x105E) recién cuando cargaron TODOS, y a todos juntos
     s = SALAS.get(p.get("sala"))
-    if s and len(s["miembros"]) > 1:
+    if s and conexion in s["miembros"] and len(s["miembros"]) > 1 and s.get("jugando"):
+        if s.get("largada"):
+            # ★ (20-nov) ya se largó (por tiempo o porque los demás estaban): el que llega tarde larga
+            #   SOLO él. Antes se repetía el 0x105E a TODOS (una 2.ª largada en plena stage).
+            print("[carga] sala %s: #%d terminó de cargar después de la largada: larga sólo él"
+                  % (p.get("sala"), conexion), flush=True)
+            return [(0x105E, struct.pack("<HI", 1, 600), 0)] + activar([conexion], [numero(s, conexion)])
         s.setdefault("cargados", set()).add(conexion)
-        if set(s["miembros"]) <= s["cargados"]:
-            return ([(0x105E, struct.pack("<HI", 1, 600), 0, n) for n in s["miembros"]]
-                    + activar(s["miembros"], [numero(s, m) for m in s["miembros"]]))
-        return []
+        s.setdefault("carga_desde", time.monotonic())
+        return largar_si_cargaron(s)
     return [(0x105E, struct.pack("<HI", 1, 600), 0)] + activar([conexion], [numero_jugador(conexion)])
+
+
+# ★ (20-nov, multijugador) cuánto se espera a los que no terminan de cargar. Medido: los dos cargan en
+#   1–2 s (18-nov, 19-nov: 0x104F → 0x105F). Con uno colgado o que se fue, los demás quedaban en la
+#   pantalla de carga PARA SIEMPRE (la largada sólo se miraba al llegar un 0x105F).
+ESPERA_CARGA = float(os.environ.get("EDA_ESPERA_CARGA") or 45)
+
+
+def largar_si_cargaron(s, por_tiempo=False):
+    """La largada (0x105E) a los que ya cargaron, UNA sola vez: cuando cargaron todos los que siguen en la
+    sala o, `por_tiempo`, a los que llegaron. Los que cargan después largan solos (`termino_de_cargar`)."""
+    if not s.get("jugando") or s.get("largada"):
+        return []
+    miembros = list(s["miembros"])
+    listos = [n for n in miembros if n in s.get("cargados", ())]
+    if not listos or (not por_tiempo and len(listos) < len(miembros)):
+        return []
+    s["largada"] = True
+    if len(listos) < len(miembros):
+        print("[carga] ⚠ a los %g s largan %s; todavía cargando: %s"
+              % (ESPERA_CARGA, listos, [n for n in miembros if n not in listos]), flush=True)
+    r = [(0x105E, struct.pack("<HI", 1, 600), 0, n) for n in listos]
+    if os.path.exists(os.path.join(config.ESTADO, "con_106c")):
+        r += [(0x106C, struct.pack("<BB", i, i), 0, n) for n in listos for i in [numero(s, m) for m in listos]]
+    return r
+
+
+def vigilar_cargas(salas):
+    """Del `tick`: las salas que esperan a alguien más de ESPERA_CARGA segundos largan con los que cargaron."""
+    r = []
+    for s in list(salas.values()):
+        if (s.get("jugando") and not s.get("largada") and s.get("cargados")
+                and time.monotonic() - s.get("carga_desde", time.monotonic()) >= ESPERA_CARGA):
+            r += largar_si_cargaron(s, por_tiempo=True)
+    return r
 
 
 @maneja(0x1061)
 def npc_muerto(cmd, cuerpo, conexion, c, p):
-    """un NPC muerto [§5.11]: `u8 n · u8 1 · 6 × 0` (n = el NPC)"""
+    """un NPC muerto [§5.11]: `u8 n · u8 1 · 6 × 0` (n = el NPC). ★ (21-nov) con varios lo manda sólo el máster
+    (`0x639AA0`): las bajas son de la partida (`muertos_stage` de la sala), para el resultado de todos."""
     p["muertos"] = p.get("muertos", 0) + 1
+    s_ = SALAS.get(p.get("sala"))
+    if s_ and s_.get("jugando") and conexion in s_["miembros"]:
+        s_["muertos_stage"] = s_.get("muertos_stage", 0) + 1
     esc = p.get("escenario")
     if esc in ESCENARIOS and p.get("inicio") and len(cuerpo) >= 2 and not p.get("resultado_guardado"):
         bajas = p.setdefault("bajas_stage", set())
@@ -195,6 +265,15 @@ def npc_muerto(cmd, cuerpo, conexion, c, p):
     return []
 
 
+def en_la_stage(s, conexion):
+    """★ (20-nov) A quién se le reenvía lo de la stage: los OTROS de la sala que SIGUEN en ella. Lo midió el
+    Punto 3 con el 0x105D (fuera de la stage cierra el juego: 18-nov 10:19:37 en el lobby, 11:56:59 en la
+    sala) y se arregló sólo en el 0x105C; el 0x105D, 0x1060, 0x1062, 0x1066 y 0x106D seguían yendo a TODOS
+    los de la sala, también al que ya volvió a la sala o a las cartas mientras el otro sigue jugando."""
+    en_stage = s.get("en_stage", s["miembros"])
+    return [m for m in s["miembros"] if m != conexion and m in en_stage]
+
+
 @maneja(0x1063)
 def le_pegaron(cmd, cuerpo, conexion, c, p):
     """★ le pegaron (0x1063 C→S / 0x1062 S→C `0x547440`, aporte de Hysteria-xyz):
@@ -207,9 +286,8 @@ def le_pegaron(cmd, cuerpo, conexion, c, p):
         # 0x1062 (16 B, 0x547440): u32 jugador_id · u32 0 · u16 HP · u8 0 · u32 MP · u8 buffs
         hp = struct.unpack_from("<H", cuerpo, 1)[0] if len(cuerpo) >= 3 else 1000
         msg_62 = struct.pack("<IIHBI B", yo, 0, hp, 0, 100, 0)
-        for m in s["miembros"]:
-            if m != conexion:
-                r.append((0x1062, msg_62, 0, m))
+        for m in en_la_stage(s, conexion):
+            r.append((0x1062, msg_62, 0, m))
     return r
 
 
@@ -219,7 +297,7 @@ def sincronizar_hud_companero(cmd, cuerpo, conexion, c, p):
     s = SALAS.get(p.get("sala"))
     if not s or conexion not in s["miembros"]:
         return None
-    return [(0x1062, cuerpo, 0, m) for m in s["miembros"] if m != conexion]
+    return [(0x1062, cuerpo, 0, m) for m in en_la_stage(s, conexion)]
 
 
 @maneja(0x1067)
@@ -259,7 +337,7 @@ def sincronizar_objeto_1066(cmd, cuerpo, conexion, c, p):
     s = SALAS.get(p.get("sala"))
     if not s or conexion not in s["miembros"]:
         return None
-    return [(0x1066, cuerpo, 0, m) for m in s["miembros"] if m != conexion]
+    return [(0x1066, cuerpo, 0, m) for m in en_la_stage(s, conexion)]
 
 
 @maneja(0x105C)
@@ -272,8 +350,7 @@ def evento_guion_escenario(cmd, cuerpo, conexion, c, p):
         return []
     # ★ (Punto 3) sólo a los que SIGUEN en la stage: el 0x105D fuera de la stage cierra el juego (medido
     #   dos veces el 18-nov: 10:19:37 en el lobby y 11:56:59 en la sala)
-    en_stage = s.get("en_stage", s["miembros"])
-    return [(0x105D, cuerpo, 0, m) for m in s["miembros"] if m != conexion and m in en_stage]
+    return [(0x105D, cuerpo, 0, m) for m in en_la_stage(s, conexion)]
 
 
 @maneja(0x105D)
@@ -282,7 +359,7 @@ def sincronizar_evento_105d(cmd, cuerpo, conexion, c, p):
     s = SALAS.get(p.get("sala"))
     if not s or conexion not in s["miembros"]:
         return None
-    return [(0x105D, cuerpo, 0, m) for m in s["miembros"] if m != conexion]
+    return [(0x105D, cuerpo, 0, m) for m in en_la_stage(s, conexion)]
 
 
 @maneja(0x1060)
@@ -291,7 +368,7 @@ def sincronizar_tick_1060(cmd, cuerpo, conexion, c, p):
     s = SALAS.get(p.get("sala"))
     if not s or conexion not in s["miembros"]:
         return [(0x1060, cuerpo if len(cuerpo) >= 4 else struct.pack("<I", 0), 0)]
-    return [(0x1060, cuerpo, 0, m) for m in s["miembros"] if m != conexion]
+    return [(0x1060, cuerpo, 0, m) for m in en_la_stage(s, conexion)]
 
 
 @maneja(0x106D)
@@ -300,7 +377,7 @@ def sincronizar_tiempo_106d(cmd, cuerpo, conexion, c, p):
     s = SALAS.get(p.get("sala"))
     if not s or conexion not in s["miembros"]:
         return [(0x106D, cuerpo if len(cuerpo) >= 16 else bytes(16), 0)]
-    return [(0x106D, cuerpo, 0, m) for m in s["miembros"] if m != conexion]
+    return [(0x106D, cuerpo, 0, m) for m in en_la_stage(s, conexion)]
 
 
 @maneja(0x1001)
@@ -364,11 +441,44 @@ def usar_moneda(cmd, cuerpo, conexion, c, p):
 
 @maneja(0x1064)
 def fin_de_stage(cmd, cuerpo, conexion, c, p):
-    """★ la stage terminó [§5.13, §5.14]"""
+    """★ la stage terminó [§5.13, §5.14].
+    ★ (21-nov) CON VARIOS, el fin es de TODA la partida. Medido en el exe: el guion avisa el fin por
+    `SendEvent` (`0x636EA0`), que sólo llama al delegado que manda el 0x1064 (`0x546480`) si la bandera
+    `+0x168` del administrador de escenarios está prendida; esa bandera es la del MÁSTER de la partida (se copia
+    de la red en `0x64583F`; la prende `0x749020` y la apaga `0x747220`, y el 0x1058 tipo 3 se la pasa al nuevo
+    anfitrión en `0x50C2DB` / `0x54851C`). Lo mismo las bajas (0x1061, `0x639AA0`). O sea: los demás NUNCA mandan
+    su 0x1064 y su escenario no termina solo. Medido en el server de prueba (21-nov 16:58): el anfitrión terminó
+    y volvió a la sala; el invitado quedó en la stage. Ahora el 0x1064 del máster cierra la stage de todos los que
+    SIGUEN en ella (cada uno con su resultado y sus cartas); el de otro (no debería llegar) cierra sólo la suya."""
+    r = _fin_de_uno(cmd, cuerpo, conexion, c, p)
+    s = SALAS.get(p.get("sala"))
+    if not (s and conexion in s["miembros"] and len(s["miembros"]) > 1):
+        return r
+    if s.get("anfitrion") != conexion:
+        if r:
+            print("partida %s: 0x1064 de #%s, que no es el máster (#%s): sólo su resultado"
+                  % (s.get("partida_id", "?"), conexion, s.get("anfitrion")), flush=True)
+        return r
+    from servidor.cuentas import leer
+    equipo = max(p.get("muertos", 0), s.get("muertos_stage", 0))
+    otros = [m for m in en_la_stage(s, conexion) if not partida(m).get("resultado_guardado")]
+    for m in otros:
+        pm = partida(m)
+        pm["muertos"] = max(pm.get("muertos", 0), equipo)            # (las bajas son del equipo: las cuenta el máster)
+        r += [(x[0], x[1], x[2], m) for x in _fin_de_uno(cmd, b"", m, leer(m), pm)]
+    if otros:
+        print("partida %s: el máster #%s terminó la stage → también para %s"
+              % (s.get("partida_id", "?"), conexion, ", ".join("#%s" % m for m in otros)), flush=True)
+    return r
+
+
+def _fin_de_uno(cmd, cuerpo, conexion, c, p):
+    """El fin de la stage de UN jugador: su EXP, su premio, su PlayEnd, su resultado y sus cartas."""
     if p.get("resultado_guardado"):                     # (el aviso tardío no paga dos veces)
         return []
     p["resultado_guardado"] = True
     p["cierre_bajas"] = None
+    p["game_over_en"] = None                            # (si estaba muerto esperando: ya no hay game over)
     inicio = p.get("inicio") or time.time()
     ms = int((time.time() - inicio) * 1000)
     # ★ el premio sale del XML del escenario (RANK_POINT, KILL_POINT, TOTALEXP, MONSTER_CNT,
@@ -384,7 +494,9 @@ def fin_de_stage(cmd, cuerpo, conexion, c, p):
     muertos = p.get("muertos", 0)
     frac = min(1.0, muertos / float(mc)) if mc > 0 else 1.0
     exp_ganada = max(1, int(round(te * frac)))
-    plata_ganada = 100 + 10 * muertos              # 🟡 la plata: inventada
+    # ★ (20-nov, Paso 6, decisión del dueño) sin el oro inventado (100 + 10 × bajas): el oro del Stage es SÓLO el
+    #   de StageReward.xml (Type 0, dar_premio), el que el cliente muestra en AWARD (`0x5FEA50`)
+    plata_ganada = 0
     rango_xml = next((5 - i for i, corte in enumerate(RANKRATE) if frac >= corte), 1)
     antes = nivel(c["exp"])
     c["exp"] += exp_ganada

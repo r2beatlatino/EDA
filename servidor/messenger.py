@@ -38,9 +38,10 @@ COMANDOS = ("amigos", "amigo", "agregar", "quitar", "borrar", "m", "w", "mp", "s
 #     DELETE (/quitar X) → fuera de las DOS listas (también cancela una solicitud enviada)
 
 
-def aviso(texto, destino, tipo=3):
+def aviso(texto, destino, tipo=3, nombre="[Messenger]"):
+    """(`nombre` = el remitente que se ve; el panel del Coordinador manda los suyos como «[Aviso]», servidor/panel.py)"""
     b = texto.encode("utf-16-le")
-    nom = "[Messenger]".encode("utf-16-le")[:24].ljust(26, b"\0")
+    nom = nombre.encode("utf-16-le")[:24].ljust(26, b"\0")
     return (0x1005, struct.pack("<HBII", 0, tipo, 0xFF00FF00, 0) + nom + struct.pack("<I", len(b)) + b,
             0, destino)
 
@@ -383,7 +384,7 @@ def abrir_opciones():
     import sys
     from servidor import config
     ruta = os.path.join(os.path.dirname(config.RAIZ), "EDA-Opciones.py")
-    if sys.platform != "win32" or not os.path.exists(ruta):
+    if sys.platform != "win32" or os.environ.get("EDA_SIN_PANELES") == "1" or not os.path.exists(ruta):
         return "Opciones: abre EDA-Opciones en tu PC."
     py = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     try:
@@ -503,7 +504,7 @@ def abrir_atajos():
         return False
     ruta = os.path.join(os.path.dirname(config.RAIZ), "EDA-Atajos.py")
     pid = os.path.join(config.ESTADO, "atajos.pid")
-    if sys.platform != "win32" or not os.path.exists(ruta):
+    if sys.platform != "win32" or os.environ.get("EDA_SIN_PANELES") == "1" or not os.path.exists(ruta):
         return False
     if proceso_vivo(pid) and os.path.getmtime(ruta) <= os.path.getmtime(pid):
         return False
@@ -617,7 +618,7 @@ def abrir_panel(nombre):
     import subprocess
     import sys
     ruta = os.path.join(os.path.dirname(config.RAIZ), "EDA-Messenger.py")
-    if sys.platform != "win32" or not os.path.exists(ruta):
+    if sys.platform != "win32" or os.environ.get("EDA_SIN_PANELES") == "1" or not os.path.exists(ruta):
         return False
     pid = os.path.join(config.ESTADO, "messenger_panel.pid")
     if proceso_vivo(pid):                                   # ★ 14-nov: el botón abre Y cierra

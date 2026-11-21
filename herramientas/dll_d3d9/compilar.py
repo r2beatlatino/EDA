@@ -10,6 +10,7 @@ nombre adentro (la tabla de exportaciones). El compilador no está en este repo 
 busca en la variable ZIG o en el lugar donde lo dejó el proyecto R2Beat.
 """
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -51,6 +52,20 @@ anillo=1
 ; 0 = ni siquiera lo de abajo ni el tope: el video y la red del juego como en 2009 (quedan el server,
 ;     el login del launcher y la caja negra). Para probar si un problema es de la dll
 mejoras=1
+
+[pantalla]
+; ★ EXPERIMENTAL (Punto 5): la interfaz de 2009 (800×600) escalada y centrada en una pantalla más grande, con el
+;   3D del Stage a resolución nativa. 0 = como siempre (800×600). Con 1, «resolucion» dice el tamaño (p. ej.
+;   1920x1080); escala2d_stage=0 deja el HUD del Stage como hoy (arriba a la izquierda)
+escala2d=0
+resolucion=
+escala2d_stage=1
+
+[version]
+; 1 = al arrancar, unos segundos arriba a la derecha: versión, compilación (commit) y entorno (TEST / PROD /
+;     LOCAL, según el server de arriba). No toma el foco ni los clics. 0 = no se muestra (igual queda en
+;     eda_d3d9.log y arriba a la izquierda de Options)
+aviso=1
 
 #####################################################################
 # LA CAJA NEGRA: si el juego se cae, eda_d3d9.log dice DÓNDE
@@ -132,18 +147,34 @@ def compilar():
     if not os.path.isfile(ZIG):
         raise SystemExit("⛔ no encuentro Zig 0.16.0: %s (se puede indicar con la variable ZIG)" % ZIG)
     os.makedirs(SALIDA, exist_ok=True)
-    for f in ("eda_d3d9.c", "eda_opciones.c", "eda_teclas.c", "eda_messenger.c", "d3d9.def"):
+    for f in ("eda_d3d9.c", "eda_opciones.c", "eda_teclas.c", "eda_messenger.c", "eda_version.c", "eda_aviso.c",
+              "eda_medir5.c", "eda_escala2d.c", "eda_rojo.c", "eda_graficos.c", "eda_selector.h", "d3d9.def"):
         shutil.copy(os.path.join(AQUI, f), SALIDA)
+    # ★ (19-nov) la identidad (versión, commit, sucio, fecha, build): la calcula version.py, nadie la escribe a mano
+    sys.path.insert(0, AQUI)
+    import version
+    ident = version.escribir_header(os.path.join(SALIDA, "eda_version.h"))
     dll = os.path.join(SALIDA, "d3d9.dll")
     if os.path.exists(dll):
         os.remove(dll)
     r = subprocess.run([ZIG, "cc", "-target", "x86-windows-gnu", "-shared", "-O2", "-s", "-o", "d3d9.dll",
-                        "eda_d3d9.c", "d3d9.def", "-lkernel32", "-luser32", "-lwinmm", "-lws2_32", "-liphlpapi"],
+                        "eda_d3d9.c", "d3d9.def", "-lkernel32", "-luser32", "-lwinmm", "-lws2_32", "-liphlpapi", "-lgdi32"],
                        cwd=SALIDA, capture_output=True, text=True)
     if r.returncode or not os.path.isfile(dll):
         raise SystemExit("⛔ no compiló:\n" + (r.stderr or r.stdout)[-3000:])
     open(os.path.join(SALIDA, "eda_d3d9.ini"), "w", encoding="utf-8", newline="\r\n").write(INI)
-    print("★ %s\n  %d B · md5 %s" % (dll, os.path.getsize(dll), md5(dll)))
+    # ★ (19-nov) el manifiesto de ESTA compilación: la identidad + el hash del archivo final (que no puede ir adentro)
+    datos = open(dll, "rb").read()
+    manif = dict(ident, archivo="d3d9.dll", tam=len(datos), md5=hashlib.md5(datos).hexdigest(),
+                 sha256=hashlib.sha256(datos).hexdigest())
+    open(dll + ".json", "w", encoding="utf-8", newline="\n").write(json.dumps(manif, ensure_ascii=False, indent=2) + "\n")
+    print("★ %s\n  %d B · md5 %s" % (dll, len(datos), manif["md5"]))
+    print("  EDA %s · commit %s%s · build %s · %s%s" % (ident["version"], ident["commit"],
+          "-dirty (LOCAL: cambios sin commitear)" if ident["sucio"] else "", ident["build"], ident["fecha"],
+          "" if ident["en_github"] is None else " · en GitHub: %s" % ("sí" if ident["en_github"] else "NO (sólo local)")))
+    for c in ident["cambios"][:12]:
+        print("    cambio: %s" % c)
+    print("  manifiesto: %s" % (dll + ".json"))
     return dll
 
 

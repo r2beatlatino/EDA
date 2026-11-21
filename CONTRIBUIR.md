@@ -19,6 +19,11 @@ programás, también sirve un issue con una foto y lo que dice la consola.
 - **`develop`** es lo próximo, y es lo que corre el server de **prueba**. Los dos servers se
   actualizan **solos** a los ~5 minutos de cada cambio en su rama. Ahí se prueba jugando:
   `py jugar.py --server IP:35900`.
+- **El cliente de `develop`** (la `d3d9.dll` que sale de ese código) lo compila y lo publica GitHub
+  solo en cada fusión: queda en la release **`cliente-develop`** del repo, con su lista. Para probar
+  con él, como lo abre el launcher: `py herramientas\dll_d3d9\canal.py bajar` y después
+  `py jugar.py --server IP:35900 --como-launcher` (ver `herramientas/dll_d3d9/LEEME.md`). No toca
+  `main` ni lo que reciben los jugadores.
 - **Tu trabajo** va en una rama tuya (`tienda-cash`, `fix-sala-llena`…), con un **PR a `develop`**.
 - Cuando `develop` anduvo bien en prueba, alguien abre el PR `develop → main`: al fusionarlo, prod
   se actualiza solo (con respaldo de las cuentas antes).
@@ -28,12 +33,13 @@ programás, también sirve un issue con una foto y lo que dice la consola.
 | para fusionar en | hace falta |
 |---|---|
 | `develop` | las pruebas en verde (`privado`, `server`, `docker`) + **1 aprobación** de un colaborador (Hysteria-xyz, Urek-Mazinoo, Rui) que no sea el autor |
-| `main` (prod) | lo mismo + **2 aprobaciones** (o Rui) |
+| `main` (prod) | lo mismo: **1 aprobación** de otro colaborador (desde el 19-nov; antes eran 2), o Rui |
 
 - El trabajo **`privado`** de las pruebas falla si el PR trae algo con forma de dato privado: una IP
-  pública desconocida (la de tu VPS o tu casa), una IP de tu red (`192.168.N.x`), una MAC de verdad,
-  una ruta de tu carpeta de usuario o un correo. En las pruebas usá IPs de documentación
-  (`192.0.2.x`, `198.51.100.x`, `203.0.113.x`), `192.168.x.x` en los textos y MACs `02:00:00:00:00:0N`.
+  pública desconocida (la de tu VPS o tu casa), una privada `172.16–31.x` (la red interna de un server),
+  una MAC de verdad, una ruta de tu carpeta de usuario o un correo. En las pruebas usá IPs de documentación
+  (`192.0.2.x`, `198.51.100.x`, `203.0.113.x`) para las públicas, cualquier `192.168.x.x` para las locales
+  (desde el 21-nov pasan todas: son de redes locales, no llevan a nadie) y MACs `02:00:00:00:00:0N`.
 - **Los finales de línea** los ordena git solo (`.gitattributes`: todo en LF). No hay que configurar nada.
   Cómo trabaja cada agente y qué cambia de un entorno a otro: `documentacion/ENTORNOS.md`.
 

@@ -2,6 +2,7 @@ r"""servidor/salas.py -- el LOBBY y las SALAS: listas, entrar, crear, chat, list
 """
 import os
 import struct
+import time
 
 from servidor import config
 from servidor.config import P
@@ -93,7 +94,7 @@ def miembro(c, indice, completo=False, conexion=None, para=None, listo=False):
     return bytes(m)
 
 
-def pares(s, espera=0):
+def pares(s, espera=0, anotar=True):
     """★ 0x1059 «Peer Public IP» (`0x550BE0`) a CADA miembro de la sala: las direcciones UDP de
     todos, para el P2P (el ping de la sala, la partida). 7 B: u8 N · 4 B 🟡 · u8 → +0x2DE · u8 →
     +0x2DF; y N × 7 B: u8 id · u32 IP · u16 puerto, COMO ENTEROS (el cliente les hace htonl /
@@ -115,13 +116,32 @@ def pares(s, espera=0):
                 #   existe (medido 17:25)
                 regs.append(struct.pack("<BIH", i, udp[0], udp[1]))
                 # ★ (MEDICIONES §53) qué camino le tocó a cada par, en el registro del server (sin la IP)
-                if dest is not None:
+                if dest is not None and anotar:
                     camino = ("relay" if relay.relay() and udp[1] == config.RELAY_BASE + 1 + n
                               else "casa (privada)" if udp == tuple(partida(n).get("privada") or ())
                               else "directo (pública)")
                     print("sala: a #%s le doy #%s por %s" % (dest, n, camino), flush=True)
         cuerpo = struct.pack("<B4xBB", len(regs), 0, 0) + b"".join(regs)
+        s.setdefault("anunciado", {})[dest] = cuerpo         # (21-nov) lo último que se le dio: ver `reanunciar`
         r.append((0x1059, cuerpo, espera, dest))
+    return r
+
+
+def reanunciar(salas):
+    """★ (21-nov) Del `tick`: si en una sala que ESPERA (no jugando) la dirección de alguien cambió (su NAT le dio
+    otro puerto, llegó su 0x3006 de esta sesión, o se olvidó una vieja), se les vuelve a dar el 0x1059 a los que
+    les cambió. Antes se daba una sola vez, al entrar: con una dirección que cambiaba, el otro le seguía hablando
+    a la vieja."""
+    r = []
+    for s in list(salas.values()):
+        if s.get("jugando") or len(s["miembros"]) < 2 or "anunciado" not in s:
+            continue
+        antes = dict(s["anunciado"])
+        nuevos = pares(s, anotar=False)
+        for x in nuevos:
+            if antes.get(x[3]) != x[1]:
+                print("sala: a #%s le cambió una dirección de su sala: 0x1059 otra vez" % x[3], flush=True)
+                r.append(x)
     return r
 
 
@@ -229,14 +249,24 @@ def _sacar_de_sala(s, num, conexion):
         if not s["en_stage"] and s.get("jugando"):
             s["jugando"] = False
             VIVO.LISTA_CAMBIO = True                    # (que el lobby la vea «Waiting»)
+    if "cargados" in s:
+        s["cargados"].discard(conexion)
     if not s["miembros"]:
         del SALAS[num]
         return []
     if s["anfitrion"] == conexion:
-        s["anfitrion"] = s["miembros"][0]
+        # ★ (21-nov) en plena stage, el mando (el MÁSTER del escenario: el único que manda bajas y el fin, ver
+        #   `partida.fin_de_stage`) pasa a uno que SIGUE en la stage; si no, el que termina queda sin máster
+        en_stage = [m for m in s["miembros"] if m in s.get("en_stage", ())] if s.get("jugando") else []
+        s["anfitrion"] = (en_stage or s["miembros"])[0]
         s.get("listos", set()).discard(s["anfitrion"])  # (el anfitrión no «está listo»: larga)
     nuevo = numero(s, s["anfitrion"])
-    return [(0x1058, struct.pack("<BHB", yo, 3, nuevo), 0, n) for n in s["miembros"]]
+    r = [(0x1058, struct.pack("<BHB", yo, 3, nuevo), 0, n) for n in s["miembros"]]
+    # ★ (20-nov, multijugador) si se fue (o se le cortó el juego) mientras los demás esperaban en la
+    #   pantalla de carga, y los que quedan ya cargaron: la largada. Antes sólo se miraba al llegar un
+    #   0x105F, y como ya habían llegado todos, nadie la daba: los demás quedaban cargando para siempre.
+    from servidor.partida import largar_si_cargaron
+    return r + largar_si_cargaron(s)
 
 
 @maneja(0x1045)
@@ -301,7 +331,7 @@ def listo(cmd, cuerpo, conexion, c, p):
 
 @maneja(0x100D)
 def chat(cmd, cuerpo, conexion, c, p):
-    """★ CHAT (lobby / sala) + COMANDOS GM (/oro, /cash, /nivel, /item, /ayuda)"""
+    """★ CHAT (lobby / sala) + COMANDOS GM (/oro, /nivel, /item, /ayuda)"""
     if not (len(cuerpo) >= 13):
         return None
     # C→S (medido 18:19): u8 tipo (1) · u32 destino (FFFFFFFF = todos) · u32 0 · u32 largo en
@@ -338,12 +368,8 @@ def chat(cmd, cuerpo, conexion, c, p):
                 guardar(c)
                 return _aviso(f"Oro actualizado a {c['plata']}")
             return _aviso("Uso: /oro <cantidad>")
-        elif sub == "cash":
-            if len(partes) >= 2 and partes[1].isdigit():
-                c["cash"] = max(0, min(int(partes[1]), 2_000_000_000))
-                guardar(c)
-                return _aviso(f"Cash actualizado a {c['cash']}")
-            return _aviso("Uso: /cash <cantidad>")
+        elif sub == "cash":                                  # ★ (Paso 6) EDA usa sólo oro
+            return _aviso("El cash no existe en EDA: todo se compra con oro (/oro <cantidad>).")
         elif sub in ("nivel", "lvl", "level"):
             if len(partes) >= 2 and partes[1].isdigit():
                 n = max(1, min(int(partes[1]), len(EXPS)))
@@ -393,7 +419,7 @@ def chat(cmd, cuerpo, conexion, c, p):
             guardar(c)
             return _aviso("Bolsa limpiada (equipo y atajos conservados)")
         elif sub in ("ayuda", "help"):
-            return _aviso(f"Comandos GM: /oro <n>, /cash <n>, /monedas <n>, /nivel <1-{len(EXPS)}>, /item <id> [cant], /stats <5 valores>, /limpiar · Messenger: /messenger")
+            return _aviso(f"Comandos GM: /oro <n>, /monedas <n>, /nivel <1-{len(EXPS)}>, /item <id> [cant], /stats <5 valores>, /limpiar · Messenger: /messenger")
         return _aviso(f"Comando desconocido: /{sub}. Usa /ayuda")
 
     # ⚠ medido con Frida (18:23): el TIPO lo lee en B+2 (con el tipo en B+0 leía 0xFF). La
@@ -645,8 +671,16 @@ def largar(cmd, cuerpo, conexion, c, p):
         return [(0x1050, struct.pack("<H", 0x138A), 0)]
     if s:
         s["jugando"], s["cargados"] = True, set()
+        s.pop("largada", None)                          # (20-nov: la largada se da UNA vez por stage)
+        s.pop("carga_desde", None)
         s["en_stage"] = set(miembros)                   # (Punto 3: «jugando» hasta que salgan TODOS)
+        s["muertos_stage"] = 0                          # (21-nov: las bajas de la partida, del máster)
         s["listos"] = set()                             # (al volver de la stage, todos «no listo»: `0x548AF0`)
+        # ★ (21-nov, diagnóstico) el ID de ESTA partida: una línea del registro con quién juega, para juntar
+        #   después todo lo de la partida (herramientas/diag_partida.py). Sin IP ni nada de la cuenta salvo su nombre
+        s["partida_id"] = time.strftime("P-%Y%m%d-%H%M%S", time.gmtime()) + "-s%d" % p.get("sala", 0)
+        print("partida %s empieza: sala %s · %s" % (s["partida_id"], p.get("sala"), " · ".join(
+            "#%s=%s" % (n, ASIGNADAS.get(n, "?")) for n in miembros)), flush=True)
     #   ⛔ probado (21:15) llenarlos con las habilidades de los atajos: NO las hace lanzar
     #   (el MP no baja con F1). Son de los OTROS (`0x61C230` los copia a su miembro). En cero.
     lista = b"".join(bytes([numero(s, n)]) + bytes(67) for n in miembros)

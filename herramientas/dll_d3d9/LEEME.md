@@ -43,6 +43,62 @@ arrastra lo que tenía prendido. Medido: un `.ini` viejo con todo prendido carga
 `EDA_MEJORAS`, `EDA_TOPE_FPS`, `EDA_MOSTRAR_FPS`, `EDA_RED_INMEDIATA`, `EDA_TOPE_ESTRICTO`,
 `EDA_BUFERES_RAPIDOS` (el anillo), `EDA_LETRAS_32`, `EDA_SERVER`.
 
+## Qué dll es (versionado, 19-nov)
+
+Cada compilación dice sola qué es; nadie edita el código para eso.
+
+| dato | de dónde sale |
+|---|---|
+| versión | `VERSION` (lo único que se cambia a mano, al sacar una versión) |
+| commit | el **último commit que tocó el código que se compila** (`.c`/`.h`/`.def`/`VERSION` de esta carpeta, sin las `prueba_*`), no HEAD: commitear `exe/d3d9.dll`, una prueba, un `.py` o este LEEME no lo cambia, y el CI recompila la misma dll |
+| sucio | cambios sin commitear (o archivos nuevos, o sin git) en ese código → `-dirty`, compilación **LOCAL**: nunca pasa por publicada |
+| fecha | limpia: la del commit (UTC), así es reproducible · sucia: la hora real |
+| build | `b` + 10 hex del sha256 del código (con LF): mismo código = mismo build en cualquier PC |
+| entorno | **en el juego**, del server al que va (`[red] server`, `EDA_SERVER` o el 3er argumento del launcher): host de la PC o de la casa → LOCAL · puerto 35900 → TEST · 25900 → PROD · otro → OTRO |
+
+- `version.py` escribe `eda_version.h` (no se commitea); `compilar.py` lo usa y deja **`d3d9.dll.json`** al lado de
+  la dll: la identidad + md5/sha256/tamaño del archivo (el hash final no puede ir adentro: lo cambiaría).
+- En el juego: el **aviso de arranque** (8 s, arriba a la derecha, no toma foco ni clics; `[version] aviso=0` lo
+  apaga), la esquina de **Options** y la línea `identidad:` de `eda_d3d9.log` (y `entorno` en cada `connect`).
+- `identificar.py RUTA\d3d9.dll [--esperado d3d9.dll.json | cliente-develop.json | eda.json | otra.dll] [--carpeta JUEGO]`:
+  lee la marca `EDA-ID|…`, calcula los hashes y compara con lo que el esperado **realmente** trae. El manifiesto
+  del launcher (`files`: `path`, `size`, `md5`; también firmado) no trae la identidad de la dll: su `version` es la
+  de la release, y commit/build salen «no disponible» (se comparan los hashes). `--carpeta` revisa además ruta,
+  tamaño y hash de cada archivo de la lista (el `.ini` y el `autoexec.cfg` del jugador sólo avisan).
+  0 coincide · 1 manifiesto ilegible o incorrecto (sin la dll, sin hash, datos que no cierran) · 2 no coincide ·
+  3 dll antigua sin identidad. Sin red.
+- Pruebas: `python herramientas/dll_d3d9/prueba_version.py [d3d9.dll]` (también en el CI).
+
+## El cliente de develop (para probar, 19-nov)
+
+`exe/d3d9.dll` es la de la última release: la que sale del código de `develop` no estaba en ningún lado.
+Ahora, **en cada fusión en `develop`, el CI la compila y la publica sola** en la release
+**`cliente-develop`** del repositorio (trabajo `cliente-develop` de `.github/workflows/pruebas.yml`):
+
+| archivo | qué es |
+|---|---|
+| `cliente-develop.json` | la lista: la identidad de la dll (como `d3d9.dll.json`) y `files` con `path`, `size`, `md5`, `sha256` (la forma del manifiesto del launcher) |
+| `d3d9.dll` | la compilada por el CI desde ese commit (la misma del trabajo `dll`) |
+| `eda_d3d9.ini` | el `.ini` por defecto de `compilar.py` |
+
+`EDA_limpio.exe` no se copia ahí: la lista da su md5 y la dirección del que está en el repositorio, en ese
+commit. El resto del cliente (Data.dat y demás) no cambia con `develop`.
+
+```bat
+py herramientas\dll_d3d9\canal.py bajar                 :: la dll y el .ini → _trabajo\dll\ (de ahí la toma jugar.py)
+py jugar.py --server IP:35900 --como-launcher           :: el juego como lo abre el launcher, contra el server de prueba
+py herramientas\dll_d3d9\canal.py bajar C:\copia\de\EDA :: o a una copia del juego (baja también el exe)
+py herramientas\dll_d3d9\identificar.py _trabajo\dll\d3d9.dll --esperado cliente-develop.json
+```
+
+- En el juego, el aviso de arranque tiene que decir el commit de la lista y **TEST** (puerto 35900).
+- El `.ini` es del jugador: si ya está y es distinto, `bajar` no lo pisa (lo dice).
+- ⚠ Es un canal de **prueba**: la lista no está firmada (la de los jugadores sí). No toca `main`, ni el
+  launcher, ni lo que reciben los jugadores: eso sigue llegando con una release del cliente.
+- Un launcher de prueba propio sólo necesita esto: bajar `cliente-develop.json`, comparar los `sha256` con
+  lo que tiene, bajar lo distinto de `base` + `path` (o de `url`, si la entrada la trae) y abrir
+  `EDA_limpio.exe` con `EDA_SERVER=host:35900` (o `[red] server=` en el `.ini`).
+
 ## Si a alguien se le cae el juego
 
 1. Que mande **`eda_d3d9.log`**, y si existen, `EDA_limpio.rpt` y `EDA_limpio.dmp` (el informe del
@@ -92,3 +148,14 @@ py jugar.py --sin-dll                           :: jugar sin ella (⚠ sin ella 
 Para diagnosticar Direct3D se puede usar **DXVK** (su panel en pantalla: cuadros, dibujos, uso de la
 placa) en lugar de esta dll; ver MEDICIONES §41. DXVK pide Vulkan, que muchas PCs modestas no tienen:
 por eso la solución es esta dll, que anda con cualquier D3D9.
+
+
+### Selector de Stage (candidata 0.5.1)
+
+Las imágenes de las flechas del mapa solapan parte de los botones y podían recibir el doble clic sin abrir el Stage. La DLL excluye esas imágenes del hit-test exclusivamente en la escena del selector, conservando sus dibujos y los rectángulos de los botones. No cambia el escalado, el mouse de combate ni los tiempos del doble clic.
+
+Se puede desactivar con `[mazino] selector_stage=0` en eda_d3d9.ini. Respeta también los interruptores generales de mejoras/mazino. El parche comprueba las dos llamadas y la firma de TestPoint antes de instalarse; con un EXE incompatible no se aplica. El registro dice `selector_stage: flechas sin captura de clics (2/2 llamadas)`.
+
+La versión numérica de la candidata es 0.5.1, identificada además por commit/build. Esta PR no declara una entrega estable ni publica etiquetas. No se atribuye al arreglo un parpadeo general que no se haya reproducido.
+
+Prueba de regresión: `zig cc -o prueba_selector prueba_selector.c` y ejecutar el resultado. Reproduce la imagen 14011 interceptando el borde del botón 14006; comprueba el destino corregido, centros, bordes y que otras escenas/controles se conserven.

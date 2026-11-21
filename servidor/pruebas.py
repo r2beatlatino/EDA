@@ -69,8 +69,15 @@ def control():
     responder(0x105F, b"\0" * 4, 99)
     for _ in range(10):
         responder(0x1061, b"\0" * 8, 99)
+    oro_antes = leer(99)["plata"]
     r = responder(0x1064, b"\0", 99)
     cmds = [x[0] for x in r]
+    tpo = tabla_premios()
+    if tpo:
+        esc_ = partida(99).get("escenario")
+        oro_xml = sum(d_ for t_, d_, _ in tpo.get(esc_, (0, []))[1] if t_ == 0)
+        chequear("(Paso 6) al terminar el Stage el oro sube SÓLO lo de StageReward (Type 0: %d), sin 100 + 10 × bajas"
+                 % oro_xml, leer(99)["plata"] - oro_antes == oro_xml, leer(99)["plata"] - oro_antes)
     chequear("0x1064 → 1073 + 106E + 106F", cmds == [0x1073, 0x106E, 0x106F], cmds)
     premio = partida(99).get("premio", [])
     largo = 29 + sum(21 + (36 if es_equipo(t) else 0) for t in premio)
@@ -292,6 +299,8 @@ def control():
                  and d["items"][-1][2] >= 18)
         chequear("0x1040 = 15 + 2 + 21 + 36 (equipo: con ficha)", len(r[0][1]) == 15 + 2 + 21 + 36,
                  len(r[0][1]))
+        chequear("(Paso 6) la compra no toca el cash guardado y al cliente va cash = 0 (+6)",
+                 d.get("cash") == antes.get("cash") and struct.unpack_from("<I", r[0][1], 6)[0] == 0)
         d["plata"] = precio - 1
         guardar(d)
         r = responder(0x103F, bytes.fromhex("00000000010100"), 203)
@@ -378,8 +387,8 @@ def control():
     chequear("★ el revés: con basura en ese lugar (juego sin comillas) NO hay MAC → la inventada",
              partida(404).get("mac") is None and identidad_de(404) == identidad_falsa(404))
     # el punch vio a 401 y 403 detrás de la MISMA IP pública (un cíber), y a 402 en otra casa
-    json.dump({"401": ["200.1.1.1", 40001], "402": ["190.2.2.2", 40002], "403": ["200.1.1.1", 40003],
-               "404": ["181.4.4.4", 40004]}, open(config.PUNCH_MAPA, "w"))
+    json.dump({"401": ["200.1.1.1", 40001, 1e12], "402": ["190.2.2.2", 40002, 1e12], "403": ["200.1.1.1", 40003, 1e12],
+               "404": ["181.4.4.4", 40004, 1e12]}, open(config.PUNCH_MAPA, "w"))
     SALAS[88] = {"sala": bytes(0x59), "anfitrion": 401, "miembros": [401, 402, 403, 404]}
     a = {x[3]: x[1] for x in pares(SALAS[88])}
 
@@ -401,7 +410,7 @@ def control():
              and struct.unpack_from("<IH", m, 0x48) == (ip_int("200.1.1.1"), 40001))
     # ★ (MEDICIONES §52, lo de prod: dos PCs de la misma casa y el ANFITRIÓN sin 0x3006) → la misma IP
     #   con que se conectaron alcanza para darse la PRIVADA
-    json.dump({"402": ["190.2.2.2", 40002]}, open(config.PUNCH_MAPA, "w"))
+    json.dump({"402": ["190.2.2.2", 40002, 1e12]}, open(config.PUNCH_MAPA, "w"))
     partida(401)["ip_tcp"], partida(402)["ip_tcp"] = "190.2.2.2", "190.2.2.2"
     chequear("misma IP de conexión, el anfitrión sin punch: a 402 le llega la PRIVADA de 401",
              dir_udp(401, 402) == (ip_int("192.168.0.1"), 50401)
@@ -412,8 +421,8 @@ def control():
              dir_udp(402, 401) == (0x7F000001, config.RELAY_BASE + 1 + 402)
              and dir_udp(401, 402) == (0x7F000001, config.RELAY_BASE + 1 + 401))
     partida(401).pop("ip_tcp"), partida(402).pop("ip_tcp")
-    json.dump({"401": ["200.1.1.1", 40001], "402": ["190.2.2.2", 40002], "403": ["200.1.1.1", 40003],
-               "404": ["181.4.4.4", 40004]}, open(config.PUNCH_MAPA, "w"))
+    json.dump({"401": ["200.1.1.1", 40001, 1e12], "402": ["190.2.2.2", 40002, 1e12], "403": ["200.1.1.1", 40003, 1e12],
+               "404": ["181.4.4.4", 40004, 1e12]}, open(config.PUNCH_MAPA, "w"))
     escribir_relay()
     chequear("relay.json: la «falsa» de quien mandó su MAC es la real (el relay no la toca)",
              json.load(open(config.RELAY_MAPA))["401"]["falsa"] == macs[401])
@@ -498,6 +507,16 @@ def control():
         r = responder(0x1039, struct.pack("<IH", 0x186, 1), 203)
         chequear("★ el revés: con todo sano no hay nada que arreglar → resultado 0",
                  r[0][1][:2] == b"\0\0" and leer(203)["plata"] == 30000 - esperado)
+        # ★ REPAIR EACH, como lo arma el cliente (`0x54A6ED`): u32 · u16 0 · u32 el serial de ESE ítem
+        d = leer(203)
+        d["durabilidad"] = {str(w): 7500, str(w + 1): 5000}
+        plata = d["plata"]
+        guardar(d)
+        uno = (tt[1][0] - 7500) * tt[1][1]
+        r = responder(0x1039, struct.pack("<IHI", 0x186, 0, w), 203)
+        chequear("Repair Each (u16 0 + el serial): arregla SÓLO ese ítem y cobra %d" % uno,
+                 struct.unpack_from("<HIB", r[0][1]) == (1, plata - uno, 1)
+                 and leer(203)["durabilidad"] == {str(w): 10000, str(w + 1): 5000})
     else:
         falta_xml("ItemTypeList.xml", config.TIPOS_XML)
     # ★ REFINE SPIRIT STONE: Phase (3 × 21001 → 21021) y Level (2 × 21001 → 21002)
@@ -640,10 +659,17 @@ def control():
     chequear("★ el revés: /oro inválido devuelve aviso y mantiene el oro",
              leer(203)["plata"] == 77777 and "Uso: /oro".encode("utf-16-le") in r[0][1])
 
-    # /cash
+    # /cash: deshabilitado (Paso 6: EDA usa sólo oro); el cash guardado NO se toca
+    d = leer(203)
+    d["cash"] = 1234                                         # (una cuenta vieja con cash)
+    guardar(d)
     r = responder(0x100D, _chat_payload("/cash 9999"), 203)
-    chequear("/cash 9999 actualiza el cash a 9999",
-             leer(203)["cash"] == 9999 and "9999".encode("utf-16-le") in r[0][1])
+    chequear("(Paso 6) /cash está deshabilitado: avisa y NO cambia el cash guardado (1234)",
+             leer(203)["cash"] == 1234 and "no existe".encode("utf-16-le") in r[0][1])
+    r = responder(0x1011, b"\1\0\0\0", 203)
+    chequear("(Paso 6) 0x1012: cash = 0 al cliente (+0x0F) aunque la cuenta guarde 1234; el oro en +0x13",
+             struct.unpack_from("<I", r[0][1], 0x0F)[0] == 0
+             and struct.unpack_from("<I", r[0][1], 0x13)[0] == leer(203)["plata"] and leer(203)["cash"] == 1234)
 
     # /nivel
     r = responder(0x100D, _chat_payload("/nivel 15"), 203)
@@ -975,6 +1001,17 @@ def control():
     pruebas_nat(chequear)
     PARTIDAS.clear()
     ASIGNADAS.clear()
+    pruebas_entre_casas(chequear)
+    PARTIDAS.clear()
+    ASIGNADAS.clear()
+    SALAS.clear()
+    pruebas_carga_sin_cortes(chequear)
+    PARTIDAS.clear()
+    ASIGNADAS.clear()
+    pruebas_fin_stage_grupo(chequear)
+    PARTIDAS.clear()
+    ASIGNADAS.clear()
+    SALAS.clear()
     pruebas_messenger(chequear)
     pruebas_messenger_cuentas_reales(chequear)
     PARTIDAS.clear()
@@ -983,6 +1020,12 @@ def control():
     PARTIDAS.clear()
     ASIGNADAS.clear()
     pruebas_personajes(chequear)
+    pruebas_cazadora(chequear)
+    pruebas_150_variantes(chequear)
+    pruebas_multijugador(chequear)
+    PARTIDAS.clear()
+    ASIGNADAS.clear()
+    pruebas_panel(chequear)
     PARTIDAS.clear()
     ASIGNADAS.clear()
     shutil.rmtree(config.CUENTAS, ignore_errors=True)
@@ -1117,6 +1160,322 @@ def pruebas_personajes(chequear):
         ASIGNADAS.pop(141, None)
 
 
+def pruebas_cazadora(chequear):
+    """★ (20-nov, Paso 4) La CAZADORA (Hunter, clase 2) recién creada, contra los datos del cliente: su set
+    de grado 1 es de SU clase (USECLASS 2) y lo puede equipar a su nivel; sus habilidades son de su clase (o de
+    todas) y alcanzan a su nivel; F1–F8 = sus activas de arma 0. Lo mismo para el Warrior (control)."""
+    from servidor.personajes import personaje_nuevo
+    try:
+        t = open(config.TIPOS_XML, "rb").read()
+        x = open(config.HABILIDADES_XML, "rb").read()
+    except OSError:
+        print("  (sin ItemTypeList.xml / Skill.xml: se saltea la prueba de la Cazadora)")
+        return
+    tipos = {}
+    for m in re.finditer(rb"<ITEMTYPE ([^>]*)>", t):
+        v = dict(re.findall(rb'(\w+)="([^"]*)"', m.group(1)))
+        tipos[int(v[b"ID"])] = (int(v[b"USECLASS"]), int(v[b"LEVEL_RESTRICT"]))
+    habs = {}
+    for clase_xml, a in re.findall(rb"<(ACTIVE|PASSIVE)_SKILL ([^>]*)>", x):
+        v = dict(re.findall(rb'(\w+)="([^"]*)"', a))
+        habs[(clase_xml == b"ACTIVE", int(v[b"ID"]))] = (clase_xml == b"ACTIVE", int(v[b"CLASS"]),
+                                                          int(v.get(b"WEAPON", b"9")), int(v[b"ACQUIRE_LEVEL"]))
+    for clase, nombre in ((2, "Cazadora"), (1, "Warrior")):
+        pj = personaje_nuevo(clase, 25, "prueba", 0)
+        niv = nivel(pj["exp"])
+        equipo_ = [it for it in pj["items"] if es_equipo(it[0])]
+        chequear("%s: nivel 25 y 8 piezas de equipo puestas (casilleros 0–11)" % nombre,
+                 niv == 25 and len(equipo_) == 8 and all(it[2] < 12 for it in equipo_))
+        chequear("%s: todo su equipo es de SU clase y lo puede usar a su nivel" % nombre,
+                 all(it[0] in tipos and tipos[it[0]][0] == clase and tipos[it[0]][1] <= niv for it in equipo_),
+                 [(it[0], tipos.get(it[0])) for it in equipo_])
+        ids = [(h[1] == 1, h[2]) for h in pj["habilidades"]]           # (activas e ID: las pasivas repiten IDs)
+        propias = [i for i, h in habs.items() if h[1] in (clase, 65535) and h[3] <= niv]
+        chequear("%s: tiene TODAS las habilidades de su clase (y comunes) de su nivel, ninguna ajena" % nombre,
+                 sorted(ids) == sorted(propias) and all(habs[i][1] in (clase, 65535) for i in ids))
+        atajos = sorted((h[4], (h[1] == 1, h[2])) for h in pj["habilidades"] if h[4])
+        chequear("%s: F1–F8 = sus activas de arma 0 (1..8 sin repetir)" % nombre,
+                 [a for a, _ in atajos] == list(range(1, len(atajos) + 1)) and 0 < len(atajos) <= 8
+                 and all(habs[i][0] and habs[i][2] == 0 and habs[i][1] == clase for _, i in atajos), atajos)
+    chequear("★ el revés: el set de la Cazadora NO es del Warrior (201 ≠ 1)",
+             tipos.get(201, (0,))[0] == 2 and tipos.get(1, (0,))[0] == 1)
+
+
+def pruebas_150_variantes(chequear):
+    """★ (20-nov) Las 50 stages × Fácil/Normal/Difícil (150 variantes) contra los datos del cliente, para que el
+    barrido en el juego sea lo mínimo: catálogo (bajas y EXP), premio de StageReward.xml con ítems que existen en
+    ItemTypeList.xml, sólo ORO (Paso 6: el oro del premio es el Type 0, el cash no se toca) y la carta."""
+    from servidor.partida import premio_de_carta
+    tp = tabla_premios()
+    try:                                                     # (todos los tipos: equipo, consumibles, libros…)
+        tipos = {int(i) for i in re.findall(rb'<ITEMTYPE ID="(\d+)"', open(config.TIPOS_XML, "rb").read())}
+    except OSError:
+        tipos = set()
+    if not tp or not tipos:
+        print("  (sin StageReward.xml / ItemTypeList.xml: se saltea la prueba de las 150 variantes)")
+        return
+    malos_cat, sin_premio, items_malos, oro_mal, carta_mal, premio_malo = [], [], [], [], [], []
+    for esc, (rp, kp, te, mc) in sorted(ESCENARIOS.items()):
+        if mc <= 0 or te <= 0:
+            malos_cat.append(esc)
+        if esc not in tp:
+            sin_premio.append(esc)
+            continue
+        lista = tp[esc][1]
+        items_malos += [(esc, d) for t_, d, _ in lista if t_ == 2 and d != NADA and d not in tipos]
+        c = {"items": [], "plata": 0, "exp": 0, "cash": 777}
+        dar_premio(c, esc)
+        premio_malo += [(esc, it[0]) for it in c["items"] if it[0] not in tipos]
+        if c["plata"] != sum(d for t_, d, _ in lista if t_ == 0) or c["cash"] != 777:
+            oro_mal.append(esc)
+        x = premio_de_carta(esc)
+        if x is not None and (x[0] not in tipos or x[0] == NADA):
+            carta_mal.append((esc, x))
+    chequear("150 variantes en el catálogo (escenarios.json)", len(ESCENARIOS) == 150, len(ESCENARIOS))
+    chequear("todas con bajas (MONSTER_CNT > 0) y EXP total > 0", not malos_cat, malos_cat[:10])
+    chequear("todas con su premio en StageReward.xml", not sin_premio, sin_premio[:10])
+    chequear("los ítems de StageReward.xml que NO existen en el cliente están sólo en variantes Normal",
+             bool(items_malos) and all(e % 10 == 2 for e, _ in items_malos),
+             (sorted({d for _, d in items_malos}), len(items_malos), sorted({e for e, _ in items_malos})[:5]))
+    chequear("★ el revés: ninguna de las 150 variantes pone en la bolsa un ítem que el cliente no conoce",
+             not premio_malo, premio_malo[:10])
+    c = {"items": [], "plata": 0, "exp": 0}
+    nuevos = dar_premio(c, 1032)
+    chequear("★ el revés: el premio de 1032 NO pone el 26004 (desconocido para el cliente) en la bolsa",
+             26004 not in [it[0] for it in nuevos] and 26004 not in [it[0] for it in c["items"]])
+    chequear("(Paso 6) el premio da sólo ORO (= Σ Type 0) y no toca el cash", not oro_mal, oro_mal[:10])
+    chequear("la carta de cada stage es un ítem que existe (o nada)", not carta_mal, carta_mal[:10])
+
+
+def pruebas_multijugador(chequear):
+    """★ (20-nov) MULTIJUGADOR: la largada con varios (0x105F → 0x105E), sin nadie cargando para siempre, sin
+    largadas repetidas, de a uno entre hilos; y lo que sale por la red sin que un jugador frene a otro."""
+    import threading
+    from servidor import partida as mod_partida
+    from servidor.juego import tick
+
+    def sala_cargando(num, miembros):
+        SALAS[num] = {"sala": bytes(0x59), "anfitrion": miembros[0], "miembros": list(miembros),
+                      "numeros": {m: i for i, m in enumerate(miembros)}, "listos": set()}
+        for m in miembros:
+            partida(m)["sala"] = num
+        for m in miembros[1:]:
+            responder(0x1047, bytes([SALAS[num]["numeros"][m], 1]), m)
+        r = responder(0x104E, b"", miembros[0])
+        return [x[3] for x in r if x[0] == 0x104F]
+
+    def largadas(r):
+        return sorted(x[3] if len(x) > 3 else None for x in r if x[0] == 0x105E)
+
+    def limpiar(num, miembros):
+        SALAS.pop(num, None)
+        for m in miembros:
+            partida(m).pop("sala", None)
+
+    # 1 · los dos cargan: UNA largada a cada uno, con el último 0x105F
+    A, B, C = 501, 502, 503
+    chequear("multi: F9 con dos → 0x104F a los dos", sorted(sala_cargando(60, [A, B])) == [A, B])
+    r1 = responder(0x105F, b"\0" * 4, A)
+    r2 = responder(0x105F, b"\0" * 4, B)
+    chequear("multi: el 1.º que carga espera (sin 0x105E)", largadas(r1) == [], r1)
+    chequear("multi: el último que carga → 0x105E a los dos, una vez", largadas(r2) == [A, B], largadas(r2))
+    r3 = responder(0x105F, b"\0" * 4, A)
+    chequear("★ el revés: un 0x105F repetido después de la largada larga SÓLO a ese (antes: a todos otra vez)",
+             largadas(r3) == [None], largadas(r3))
+    limpiar(60, [A, B])
+
+    # 2 · uno se va mientras el otro ya cargó: antes el que cargó quedaba en la pantalla de carga para siempre
+    sala_cargando(61, [A, B])
+    chequear("multi: A cargó y espera a B", largadas(responder(0x105F, b"\0" * 4, A)) == [])
+    r = responder(0x1045, b"", B)                       # (B sale: Leave Room)
+    chequear("★ multi: B se va durante la carga → A larga (0x105E a A)", largadas(r) == [A], largadas(r))
+    limpiar(61, [A, B])
+
+    # 3 · al que se le cortó el juego durante la carga (cerrada): A larga con el próximo tick
+    sala_cargando(62, [A, B])
+    responder(0x105F, b"\0" * 4, A)
+    cerrada(B)
+    r = tick([A])
+    chequear("★ multi: a B se le cortó el juego durante la carga → A larga con el tick", largadas(r) == [A], largadas(r))
+    limpiar(62, [A, B])
+
+    # 4 · uno que no termina de cargar nunca: a los ESPERA_CARGA s larga el que cargó; el tarde, solo
+    sala_cargando(63, [A, B, C])
+    responder(0x105F, b"\0" * 4, A)
+    responder(0x105F, b"\0" * 4, B)
+    r = tick([A, B, C])
+    chequear("★ el revés: antes del plazo NO se larga sin C", largadas(r) == [], largadas(r))
+    SALAS[63]["carga_desde"] -= mod_partida.ESPERA_CARGA + 1
+    r = tick([A, B, C])
+    chequear("★ multi: C no termina de cargar → a los %g s largan A y B" % mod_partida.ESPERA_CARGA,
+             largadas(r) == [A, B], largadas(r))
+    chequear("multi: y el tick siguiente no larga otra vez", largadas(tick([A, B, C])) == [])
+    r = responder(0x105F, b"\0" * 4, C)
+    chequear("multi: C carga tarde → larga SÓLO C", largadas(r) == [None], largadas(r))
+    limpiar(63, [A, B, C])
+
+    # 5 · la próxima stage de la misma sala vuelve a esperar a todos
+    sala_cargando(64, [A, B])
+    responder(0x105F, b"\0" * 4, A)
+    responder(0x105F, b"\0" * 4, B)
+    mod_partida.termino_su_stage(SALAS[64], A)
+    mod_partida.termino_su_stage(SALAS[64], B)
+    chequear("multi: al terminar la stage se olvida la largada", "largada" not in SALAS[64] and not SALAS[64]["jugando"])
+    responder(0x1047, b"\1\1", B)
+    responder(0x104E, b"", A)
+    chequear("★ el revés: en la 2.ª stage el 1.º que carga vuelve a esperar",
+             largadas(responder(0x105F, b"\0" * 4, A)) == [])
+    limpiar(64, [A, B])
+
+    # 6 · de a uno entre hilos: los dos 0x105F en el MISMO instante (medido 18-nov 10:17:49, 11:54:47…)
+    malas = 0
+    for i in range(150):
+        sala_cargando(65, [A, B])
+        salidas, puerta = [], threading.Barrier(2)
+
+        def cargar(m):
+            puerta.wait()
+            salidas.extend(responder(0x105F, b"\0" * 4, m))
+        hs = [threading.Thread(target=cargar, args=(m,)) for m in (A, B)]
+        [h.start() for h in hs]
+        [h.join() for h in hs]
+        malas += largadas(salidas) != [A, B]
+        limpiar(65, [A, B])
+    chequear("★ multi: 150 veces los dos 0x105F a la vez desde dos hilos → exactamente una largada a cada uno",
+             malas == 0, "%d mal" % malas)
+
+    # 7 · lo de la stage sólo a los que SIGUEN en ella (Punto 3 lo midió con el 0x105D: fuera de la stage cierra
+    #     el juego); antes 0x105D / 0x1060 / 0x1062 / 0x1066 / 0x106D iban a todos los de la sala
+    sala_cargando(66, [A, B])
+    cuerpos = {0x105D: b"\1" * 8, 0x1060: b"\0" * 4, 0x1062: bytes(16), 0x1066: bytes(6), 0x106D: bytes(16),
+               0x105C: b"\1" * 8, 0x1063: b"\0\x64\0"}
+    ambos = all(any(len(x) > 3 and x[3] == B for x in responder(k, v, A)) for k, v in cuerpos.items())
+    chequear("multi: con los dos en la stage, lo de A le llega a B (0x105C/D, 1060, 1062/3, 1066, 106D)", ambos)
+    SALAS[66]["en_stage"].discard(B)                     # (B terminó: está en las cartas / volvió a la sala)
+    fuera = [hex(k) for k, v in cuerpos.items() if any(len(x) > 3 and x[3] == B for x in responder(k, v, A))]
+    chequear("★ multi: B ya salió de la stage → no le llega NADA de la stage de A (antes: 0x105D/1060/1062/1066/106D)",
+             not fuera, fuera)
+    limpiar(66, [A, B])
+    pruebas_estres(chequear)
+    pruebas_red_cola(chequear)
+
+
+def pruebas_estres(chequear):
+    """★ (20-nov) Sin interbloqueos ni estado roto con el candado: 6 jugadores en 6 hilos hacen al azar lo que
+    hace la gente (crear, entrar, listo, F9, cargar, salir, cortarse) mientras el reloj corre, ~1,5 s."""
+    import random
+    import threading
+    from servidor.juego import tick
+    jug = list(range(701, 707))
+    errores, hechos, fin = [], [0], time.monotonic() + 1.5
+    sala_base = bytearray(0x59)
+    struct.pack_into("<I", sala_base, 0x28, 1011)
+    sala_base[0x2F] = 3
+
+    def jugar(n):
+        rnd = random.Random(n)
+        try:
+            while time.monotonic() < fin:
+                op = rnd.randrange(8)
+                if op == 0:
+                    responder(0x101D, bytes(4) + bytes(sala_base), n)
+                elif op == 1 and SALAS:
+                    num = rnd.choice(list(SALAS.keys()) or [0])
+                    responder(0x101F, struct.pack("<IH", 0, num if isinstance(num, int) else 0) + bytes(20), n)
+                elif op == 2:
+                    s = SALAS.get(partida(n).get("sala"))
+                    if s and n in s["miembros"]:
+                        responder(0x1047, bytes([s.get("numeros", {}).get(n, 0), 1]), n)
+                elif op == 3:
+                    responder(0x104E, b"", n)
+                elif op == 4:
+                    responder(0x105F, bytes(4), n)
+                elif op == 5:
+                    responder(0x1045, b"", n)
+                elif op == 6 and rnd.random() < 0.2:
+                    cerrada(n)
+                else:
+                    responder(0x105C, b"\1" * 8, n)
+                hechos[0] += 1
+        except Exception as e:                              # noqa: BLE001
+            errores.append(repr(e))
+
+    def reloj():
+        try:
+            while time.monotonic() < fin:
+                tick(jug)
+                time.sleep(0.01)
+        except Exception as e:                              # noqa: BLE001
+            errores.append("tick: " + repr(e))
+    hs = [threading.Thread(target=jugar, args=(n,), daemon=True) for n in jug] + [threading.Thread(target=reloj, daemon=True)]
+    [h.start() for h in hs]
+    [h.join(10) for h in hs]
+    colgados = [h for h in hs if h.is_alive()]
+    chequear("★ estrés: 6 jugadores + el reloj en 7 hilos, sin interbloqueos (todos terminan)", not colgados,
+             "%d operaciones" % hechos[0])
+    chequear("estrés: ninguna excepción", not errores, errores[:3])
+    malos = [(k, m) for k, s in SALAS.items() for m in s["miembros"] if partida(m).get("sala") != k]
+    dobles = [k for k, s in SALAS.items() if len(set(s["miembros"])) != len(s["miembros"]) or not s["miembros"]]
+    chequear("estrés: cada miembro apunta a su sala, sin repetidos ni salas vacías", not malos and not dobles,
+             (malos[:3], dobles[:3]))
+    for n in jug:
+        cerrada(n)
+
+
+def pruebas_red_cola(chequear):
+    """★ (20-nov) servidor/red.py: lo que sale va por la cola de cada conexión. Un jugador que no lee no frena
+    al que le manda, y un envío cortado a mitad de paquete corta la conexión (no sigue con el flujo roto)."""
+    import socket
+    import threading
+    from servidor import red
+    import paquete_broker as P
+    clave, campo2 = bytes(range(16)), P.CAMPO_2
+    red.log = lambda m: None                                # (silencio)
+
+    # a) normal: todo llega, en orden y entero
+    a, b = socket.socketpair()
+    con = {"cli": a, "clave": clave, "campo2": campo2, "lock": threading.Lock(), "cola": __import__("queue").Queue()}
+    red.CONEXIONES[9001] = con
+    threading.Thread(target=red.escritor, args=(9001, con), daemon=True).start()
+    esperado = b"".join(P.armar(P.mensaje(0x2000 + i, bytes([i]) * (i * 7)), clave, campo2) for i in range(40))
+    for i in range(40):
+        red.enviar_a(9001, 0x2000 + i, bytes([i]) * (i * 7))
+    b.settimeout(3)
+    llegado = b""
+    while len(llegado) < len(esperado):
+        d = b.recv(65536)
+        if not d:
+            break
+        llegado += d
+    chequear("red: 40 mensajes por la cola llegan enteros y en orden", llegado == esperado,
+             "%d/%d B" % (len(llegado), len(esperado)))
+    con["cola"].put(None)
+    red.CONEXIONES.pop(9001, None)
+    a.close()
+    b.close()
+
+    # b) el otro NO lee: mandar no espera, y la conexión se corta limpia (antes: hasta 5 s por mensaje)
+    a, b = socket.socketpair()
+    a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+    a.settimeout(0.5)
+    con = {"cli": a, "clave": clave, "campo2": campo2, "lock": threading.Lock(), "cola": __import__("queue").Queue()}
+    red.CONEXIONES[9002] = con
+    threading.Thread(target=red.escritor, args=(9002, con), daemon=True).start()
+    t0 = time.monotonic()
+    for i in range(300):
+        red.enviar_a(9002, 0x2100, bytes(1000))
+    tarda = time.monotonic() - t0
+    chequear("★ red: 300 mensajes a uno que no lee NO frenan al que manda", tarda < 0.5, "%.3f s" % tarda)
+    fin = time.monotonic() + 5
+    while not con.get("cortada") and time.monotonic() < fin:
+        time.sleep(0.05)
+    chequear("★ red: el envío que no sale (timeout a mitad de paquete) corta la conexión, no sigue con el flujo roto",
+             con.get("cortada") is True)
+    red.CONEXIONES.pop(9002, None)
+    a.close()
+    b.close()
+
+
 def pruebas_nat(chequear):
     """★ P2P ENTRE CASAS (MEDICIONES §53, servidor/nat.py): el 0x0607 al relay, el 0x0609 con la
     pública que vio el relay en el 0x3002, y con ella la dirección directa del ANFITRIÓN."""
@@ -1179,6 +1538,287 @@ def pruebas_nat(chequear):
              dir_udp(960, 961) == (ip_int("203.0.113.9"), config.RELAY_BASE + 1 + 960))
     (config.P2P_ENTRE_CASAS, config.NAT_MAPA, config.RELAY_IP, config.P2P, config.PUNCH_MAPA) = viejos
 
+
+
+def pruebas_entre_casas(chequear):
+    """★ (21-nov) Lo de la prueba entre dos casas del server de prueba (05:35 UTC): punch.json va por número de
+    conexión, los números se reusan, y al invitado se le dio para el anfitrión (conexión 1) el puerto 19745 de una
+    sesión de las 04:26 — el de esta era el 18113. Y el modo «auto»: el mismo camino en los dos sentidos."""
+    from servidor.relay import estable, punch_de, publica_de, ruta
+    from servidor.salas import reanunciar
+    viejos = (config.P2P_ENTRE_CASAS, config.RELAY_IP, config.P2P, config.PUNCH_MAPA)
+    config.PUNCH_MAPA = os.path.join(config.CUENTAS, "punch_casas.json")
+    config.RELAY_IP, config.P2P, config.P2P_ENTRE_CASAS = "203.0.113.9", "directo", True
+
+    def ip_int(t):
+        return struct.unpack(">I", bytes(int(x) for x in t.split(".")))[0]
+
+    def entra(n, mac, privada, publica, ip_tcp):
+        b = bytearray(0xE9)
+        b[0x7A:0x7A + 34] = mac.encode("utf-16-le")[:34].ljust(34, b"\0")
+        struct.pack_into("<IHIH", b, 0xDD, ip_int(privada[0]), privada[1], ip_int(publica[0]), publica[1])
+        responder(0x100F, bytes(b), n)
+        partida(n)["ip_tcp"] = ip_tcp
+    ahora = time.time()
+    # (las IP son de los rangos de documentación del RFC 5737: no son de nadie)
+    entra(970, "02:CC:00:00:00:01", ("192.168.50.10", 57654), ("198.51.100.26", 18113), "198.51.100.26")
+    entra(971, "02:CC:00:00:00:02", ("192.168.0.20", 57654), ("203.0.113.77", 40500), "203.0.113.77")
+    partida(970)["desde"], partida(971)["desde"] = ahora, ahora
+    host = (ip_int("198.51.100.26"), 18113)
+    # lo que había en el server de prueba: el anfitrión con la entrada de OTRA sesión (una hora antes)
+    json.dump({"970": ["198.51.100.26", 19745, ahora - 3800], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    chequear("★ lo del server de prueba: una entrada de punch.json de OTRA sesión (mismo número) no vale",
+             punch_de(970) is None)
+    chequear("…y al invitado le llega la del anfitrión de ESTA sesión (su 0x100F: 18113), no la vieja (19745)",
+             dir_udp(970, 971) == host)
+    json.dump({"970": ["198.51.100.26", 19745]}, open(config.PUNCH_MAPA, "w"))
+    chequear("★ el revés: una entrada sin hora (de un relay viejo) tampoco vale", punch_de(970) is None)
+    json.dump({"970": ["198.51.100.26", 18113, ahora + 0.5], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    chequear("una entrada de ESTA sesión sí vale", punch_de(970) == host)
+    cerrada(970)
+    entra(970, "02:CC:00:00:00:09", ("192.168.7.7", 57654), ("192.0.2.99", 30000), "192.0.2.99")
+    partida(970)["desde"] = ahora + 10
+    chequear("★ el revés: el número 970 reusado por OTRA sesión no hereda la dirección del que se fue",
+             punch_de(970) is None and dir_udp(970, 971) == (ip_int("192.0.2.99"), 30000))
+    cerrada(970)
+    entra(970, "02:CC:00:00:00:01", ("192.168.50.10", 57654), ("198.51.100.26", 18113), "198.51.100.26")
+    partida(970)["desde"] = ahora
+    # ── modo «auto»: por pareja, el mismo camino en los dos sentidos
+    config.P2P = "auto"
+    json.dump({"971": ["203.0.113.77", 40500, ahora + 1]}, open(config.PUNCH_MAPA, "w"))
+    rel = ip_int("203.0.113.9")
+    chequear("auto: el anfitrión sin 0x3006 (no se sabe si su NAT guarda el puerto) → la pareja por el RELAY, "
+             "los dos sentidos", ruta(970, 971) == ruta(971, 970) == "relay"
+             and dir_udp(970, 971) == (rel, config.RELAY_BASE + 1 + 970)
+             and dir_udp(971, 970) == (rel, config.RELAY_BASE + 1 + 971))
+    json.dump({"970": ["198.51.100.26", 18113, ahora + 1], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    chequear("auto: las dos públicas confiables (0x3006 y 0x3002 por el mismo puerto) → DIRECTO, los dos sentidos",
+             estable(970) and estable(971) and ruta(970, 971) == ruta(971, 970) == "directo"
+             and dir_udp(970, 971) == host and dir_udp(971, 970) == (ip_int("203.0.113.77"), 40500))
+    json.dump({"970": ["198.51.100.26", 16429, ahora + 1], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    chequear("★ el revés: el NAT del anfitrión le cambia el puerto (0x3006 por 16429, 0x3002 por 18113) → RELAY, "
+             "los dos sentidos (nunca uno directo y el otro no)",
+             not estable(970) and ruta(970, 971) == ruta(971, 970) == "relay"
+             and dir_udp(971, 970)[1] == config.RELAY_BASE + 1 + 971)
+    partida(971)["ip_tcp"] = "198.51.100.26"
+    chequear("auto: misma casa (misma IP de conexión) → las PRIVADAS, los dos sentidos",
+             ruta(970, 971) == ruta(971, 970) == "casa"
+             and dir_udp(970, 971) == (ip_int("192.168.50.10"), 57654)
+             and dir_udp(971, 970) == (ip_int("192.168.0.20"), 57654))
+    partida(971)["ip_tcp"] = "203.0.113.77"
+    partida(971).pop("mac", None)
+    chequear("★ el revés: uno sin MAC → relay", ruta(970, 971) == "relay")
+    partida(971)["mac"] = "02:CC:00:00:00:02"
+    # ── la dirección cambia mientras esperan en la sala → el 0x1059 otra vez (sólo a quien le cambió)
+    config.P2P = "directo"
+    json.dump({"970": ["198.51.100.26", 18113, ahora + 1], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    SALAS[77] = {"sala": bytes(0x59), "anfitrion": 970, "miembros": [970, 971]}
+    pares(SALAS[77])
+    chequear("★ el revés: sin cambios, no se vuelve a mandar nada", reanunciar(SALAS) == [])
+    json.dump({"970": ["198.51.100.26", 18665, ahora + 2], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    r = reanunciar(SALAS)
+    chequear("el NAT del anfitrión cambió de puerto (su 0x3006 nuevo): el 0x1059 otra vez, sólo al invitado",
+             [(x[0], x[3]) for x in r] == [(0x1059, 971)]
+             and struct.pack("<IH", ip_int("198.51.100.26"), 18665) in r[0][1])
+    chequear("…y una sola vez", reanunciar(SALAS) == [])
+    SALAS[77]["jugando"] = True
+    json.dump({"970": ["198.51.100.26", 18700, ahora + 3]}, open(config.PUNCH_MAPA, "w"))
+    chequear("★ el revés: jugando, no (el 0x1059 es de la sala que espera)", reanunciar(SALAS) == [])
+    SALAS.pop(77)
+    (config.P2P_ENTRE_CASAS, config.RELAY_IP, config.P2P, config.PUNCH_MAPA) = viejos
+    # ── EDA_P2P como llega del docker-compose (vacía si el .env no la tiene)
+    import subprocess
+    import sys
+
+    def modo(valor):
+        env = dict(os.environ)
+        env.pop("EDA_P2P", None)
+        env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)      # (los mismos módulos que esta corrida)
+        if valor is not None:
+            env["EDA_P2P"] = valor
+        raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return subprocess.run([sys.executable, "-c", "from servidor import config; print(config.P2P)"], cwd=raiz,
+                              env=env, capture_output=True, text=True).stdout.strip()
+    chequear("EDA_P2P: sin la variable o vacía (el compose la pasa vacía) → directo, como siempre",
+             modo(None) == modo("") == "directo")
+    chequear("EDA_P2P: relay y auto se toman (también con mayúsculas o espacios)",
+             modo("relay") == "relay" and modo(" AUTO ") == "auto")
+    chequear("★ el revés: un valor que no existe → directo (no un modo a medias)", modo("relai") == "directo")
+
+
+def pruebas_carga_sin_cortes(chequear):
+    """★ (21-nov) servidor/salida.py: mientras el juego carga la stage (desde su 0x104F hasta su 0x105E), lo de
+    0x1003–0x100B le termina el hilo de carga (exe 0x5345C0 → «Thread DoEnd!!») y el 0x105E ya no se atiende:
+    «NOW LOADING» para siempre. Lo del server de prueba: al anfitrión le llegó un 0x1005 entre su 0x105F y su 0x105E."""
+    import types
+    from servidor import red, salida
+    PARTIDAS[980], PARTIDAS[981] = {}, {}
+    o = salida.ordenar
+    chequear("sin cargar, el chat sale de una", o(980, [(0x1005, b"hola", 0)]) == [(0x1005, b"hola", 0, 980)])
+    o(980, [(0x104F, b"", 0)])
+    chequear("cargando (después de su 0x104F): el 0x1005 se GUARDA", o(980, [(0x1005, b"a", 0)]) == [])
+    chequear("…igual todo 0x1003–0x100B", o(980, [(0x1003, b"", 0), (0x100B, b"b", 0)]) == [])
+    chequear("★ el revés: lo demás pasa (0x105F, 0x1002, 0x100C, la lista de salas)",
+             [x[0] for x in o(980, [(0x105F, b"", 0), (0x1002, b"", 0), (0x100C, b"", 0), (0x101C, b"", 0)])]
+             == [0x105F, 0x1002, 0x100C, 0x101C])
+    chequear("★ el revés: al que NO carga (el otro de la sala) le llega en el momento",
+             o(980, [(0x1005, b"x", 0, 981)]) == [(0x1005, b"x", 0, 981)])
+    r = o(980, [(0x105E, b"L", 0)])
+    chequear("su 0x105E sale PRIMERO, y después lo guardado, en el mismo orden",
+             r == [(0x105E, b"L", 0, 980), (0x1005, b"a", 0, 980), (0x1003, b"", 0, 980), (0x100B, b"b", 0, 980)])
+    chequear("…y después de la largada, el chat sale de una", o(980, [(0x1005, b"c", 0)]) == [(0x1005, b"c", 0, 980)])
+    o(980, [(0x104F, b"", 0)])
+    o(980, [(0x1005, b"d", 0)])
+    chequear("si sale de la stage (0x1075) sin largar, lo guardado sale igual",
+             [x[0] for x in o(980, [(0x1075, b"", 0)])] == [0x1075, 0x1005])
+    t0 = time.monotonic()
+    o(980, [(0x104F, b"", 0)], ahora=t0)
+    o(980, [(0x1005, b"e", 0)], ahora=t0)
+    chequear("★ una carga que no termina nunca: pasado VENCE se suelta (nada queda guardado para siempre)",
+             o(980, [(0x101C, b"", 0)], ahora=t0 + salida.VENCE + 1) == [(0x1005, b"e", 0, 980), (0x101C, b"", 0, 980)]
+             and not PARTIDAS[980].get("cargando"))
+    o(980, [(0x104F, b"", 0)])
+    for i in range(salida.TOPE + 30):
+        o(980, [(0x1005, bytes([i % 256]), 0)])
+    chequear("★ con más de TOPE guardados, se quedan los últimos TOPE", len(PARTIDAS[980]["diferidos"]) == salida.TOPE)
+    o(980, [(0x105E, b"", 0)])
+    chequear("los mensajes con espera no se tocan acá (vuelven a pasar cuando vence)",
+             o(980, [(0x1005, b"z", 300)]) == [(0x1005, b"z", 300, 980)])
+    PARTIDAS[980].clear()
+    # ── por servidor/red.py (despachar), con el envío falso: el orden de lo que de verdad sale
+    salio = []
+    viejos = (red.enviar_a, red.juego)
+    red.enviar_a = lambda n, c, cuerpo: salio.append((n, c, cuerpo))
+    red.juego = lambda: types.SimpleNamespace(ordenar_salida=salida.ordenar)
+    try:
+        red.despachar(980, [(0x104F, b"", 0)])
+        red.despachar(981, [(0x1005, b"chat", 0, 980), (0x1005, b"chat", 0, 981)])   # el chat del otro, a los dos
+        red.despachar(980, [(0x1005, b"tarde", 40)])                                 # uno con espera, mientras carga
+        time.sleep(0.15)
+        red.despachar(None, [(0x105E, b"L", 0, 980), (0x105E, b"L", 0, 981)])
+        a980 = [(c, cuerpo) for n, c, cuerpo in salio if n == 980]
+        chequear("red.despachar: al que carga, el 0x105E ANTES que el chat (y el de espera también se guarda)",
+                 a980 == [(0x104F, b""), (0x105E, b"L"), (0x1005, b"chat"), (0x1005, b"tarde")], a980)
+        chequear("★ el revés: al otro, el chat en el momento", [c for n, c, _ in salio if n == 981] == [0x1005, 0x105E])
+        red.juego = lambda: types.SimpleNamespace(ordenar_salida=lambda n, r: 1 / 0)
+        salio.clear()
+        viejo_log, red.log = red.log, (lambda m: None)
+        red.despachar(980, [(0x1005, b"igual", 0)])
+        red.log = viejo_log
+        chequear("★ el revés: si el orden falla, se manda como antes (no se pierde nada)", salio == [(980, 0x1005, b"igual")])
+    finally:
+        red.enviar_a, red.juego = viejos
+
+
+def pruebas_fin_stage_grupo(chequear):
+    """★ (21-nov) EL FIN DE LA STAGE CON VARIOS, con cuentas genéricas, salas de 2, 3 y 4 y partidas a la vez.
+    En el exe sólo el MÁSTER de la partida (el anfitrión) manda las bajas (0x1061) y el fin (0x1064): ver
+    `partida.fin_de_stage`. Antes el server le contestaba sólo al máster y los demás quedaban en la stage."""
+    from servidor.juego import tick
+    base = [0]
+
+    def jugadores(k):
+        ns = list(range(7000 + base[0], 7000 + base[0] + k))
+        base[0] += 10
+        for n in ns:
+            ASIGNADAS[n] = "gen_%d" % n                   # (cuentas genéricas: ningún nombre especial)
+        return ns
+
+    def armar(num, ns):
+        """una sala con esos jugadores, larga el primero, cargan todos → en la stage"""
+        SALAS[num] = {"sala": bytes(0x59), "anfitrion": ns[0], "miembros": list(ns),
+                      "numeros": {m: i for i, m in enumerate(ns)}, "listos": set()}
+        for m in ns:
+            partida(m)["sala"] = num
+        for m in ns[1:]:
+            responder(0x1047, bytes([SALAS[num]["numeros"][m], 1]), m)
+        responder(0x104E, b"", ns[0])
+        for m in ns:
+            responder(0x105F, b"\0" * 4, m)
+        return SALAS[num]
+
+    def a_quien(r, cmd, defecto):
+        return sorted(x[3] if len(x) > 3 else defecto for x in r if x[0] == cmd)
+
+    for k in (2, 3, 4):
+        ns = jugadores(k)
+        s = armar(80 + k, ns)
+        for _ in range(5):
+            responder(0x1061, struct.pack("<H", 1) + bytes(6), ns[0])   # (las bajas: sólo el máster las manda)
+        r = responder(0x1064, bytes([0]), ns[0])
+        chequear("fin con %d: el 0x1064 del máster → PlayEnd (0x1073) a los %d" % (k, k),
+                 a_quien(r, 0x1073, ns[0]) == ns, a_quien(r, 0x1073, ns[0]))
+        chequear("fin con %d: resultado (0x106E) y cartas (0x106F) a cada uno" % k,
+                 a_quien(r, 0x106E, ns[0]) == ns and a_quien(r, 0x106F, ns[0]) == ns)
+        bajas = [struct.unpack_from("<IH", x[1])[1] for x in r if x[0] == 0x106E]
+        chequear("fin con %d: las bajas son del equipo (las 5 del máster en el resultado de todos)" % k,
+                 bajas == [5] * k, bajas)
+        chequear("fin con %d: la sala vuelve a «Waiting» (nadie sigue en la stage)" % k, not s.get("jugando"))
+        r2 = responder(0x1064, bytes([1]), ns[1])
+        chequear("★ el revés con %d: un 0x1064 tardío de otro no paga dos veces" % k, r2 == [], r2)
+
+    # el que NO es el máster manda un 0x1064 (no debería): sólo su resultado, los demás siguen jugando
+    ns = jugadores(3)
+    s = armar(90, ns)
+    r = responder(0x1064, bytes([1]), ns[1])
+    chequear("★ el revés: un 0x1064 que no es del máster cierra SÓLO la stage de ese",
+             a_quien(r, 0x1073, ns[1]) == [ns[1]] and sorted(s["en_stage"]) == [ns[0], ns[2]] and s.get("jugando"))
+    r = responder(0x1064, bytes([0]), ns[0])
+    chequear("…y después el del máster cierra la de los que quedaban", a_quien(r, 0x1073, ns[0]) == [ns[0], ns[2]])
+
+    # uno salió antes (0x1074): no recibe nada del fin
+    ns = jugadores(3)
+    armar(91, ns)
+    responder(0x1074, b"", ns[2])
+    r = responder(0x1064, bytes([0]), ns[0])
+    chequear("★ el que salió antes de la stage (0x1074) no recibe el fin; los otros sí",
+             a_quien(r, 0x1073, ns[0]) == ns[:2], a_quien(r, 0x1073, ns[0]))
+
+    # uno muerto esperando el game over: también termina, y el game over ya no llega
+    ns = jugadores(2)
+    armar(92, ns)
+    responder(0x1065, b"", ns[1])
+    r = responder(0x1064, bytes([0]), ns[0])
+    chequear("el muerto (esperando revivir) también recibe el fin", a_quien(r, 0x1073, ns[0]) == ns)
+    chequear("…y su game over queda cancelado", not partida(ns[1]).get("game_over_en"))
+
+    # el máster se va en plena stage: el mando pasa a uno que SIGUE en la stage, y su 0x1064 cierra la de todos
+    ns = jugadores(4)
+    s = armar(93, ns)
+    responder(0x1064, bytes([1]), ns[1])              # (ns[1] ya terminó la suya)
+    r = responder(0x1074, b"", ns[0])                 # (el máster abandona)
+    nuevo = [x[1][3] for x in r if x[0] == 0x1058 and x[1][1:3] == b"\x03\x00"]
+    chequear("★ el máster abandona: el nuevo máster es uno que SIGUE en la stage (no el que ya terminó)",
+             s["anfitrion"] == ns[2] and nuevo and set(nuevo) == {s["numeros"][ns[2]]}, (s["anfitrion"], nuevo))
+    r = responder(0x1064, bytes([2]), ns[2])
+    chequear("…y su 0x1064 cierra la stage de los que quedaban", a_quien(r, 0x1073, ns[2]) == [ns[2], ns[3]])
+
+    # al máster se le corta el juego: lo mismo, con el tick
+    ns = jugadores(3)
+    s = armar(94, ns)
+    cerrada(ns[0])
+    tick(ns[1:])
+    chequear("★ al máster se le corta el juego: el mando pasa a otro de la stage", s["anfitrion"] in ns[1:])
+    r = responder(0x1064, bytes([0]), s["anfitrion"])
+    chequear("…y el fin llega a los dos que quedan", a_quien(r, 0x1073, s["anfitrion"]) == ns[1:])
+
+    # dos partidas a la vez: el fin de una no toca la otra
+    a, b = jugadores(3), jugadores(2)
+    sa, sb = armar(95, a), armar(96, b)
+    r = responder(0x1064, bytes([0]), a[0])
+    chequear("★ partidas a la vez: el fin de la sala A no le llega a nadie de la B",
+             not set(a_quien(r, 0x1073, a[0])) & set(b) and sb.get("jugando") and not sa.get("jugando"))
+    r = responder(0x1064, bytes([0]), b[0])
+    chequear("…y la B termina con su máster", a_quien(r, 0x1073, b[0]) == b)
+    for k in list(SALAS):
+        if k >= 80:
+            SALAS.pop(k, None)
 
 def pruebas_lista_servidores(chequear):
     """★ La lista de servidores (0x070B) con los jugadores de verdad."""
@@ -1346,6 +1986,18 @@ def pruebas_login(chequear):
         chequear("★ el revés: alg «none» → «algoritmo»", rechazo(sin_firma, ahora) == "algoritmo")
         chequear("★ el revés: para otro juego (aud) → «audiencia»",
                  rechazo(firmar(clave, dict(datos, jti="j-6", aud="r2beat")), ahora) == "audiencia")
+        # ★ (21-nov) el server de PRUEBA acepta SU pase (`eda-prueba`) y no el de prod, y al revés
+        chequear("★ el revés: un pase del server de prueba (aud eda-prueba) no entra a prod → «audiencia»",
+                 rechazo(firmar(clave, dict(datos, jti="j-6b", aud="eda-prueba")), ahora) == "audiencia")
+        aud_antes = config.PORTERO_AUDIENCIA
+        config.PORTERO_AUDIENCIA = "eda-prueba"
+        try:
+            chequear("prueba (EDA_PORTERO_AUDIENCIA=eda-prueba): su pase entra",
+                     rechazo(firmar(clave, dict(datos, jti="j-6c", aud="eda-prueba")), ahora) is None)
+            chequear("★ el revés: en el de prueba, un pase de prod (aud eda) → «audiencia»",
+                     rechazo(firmar(clave, dict(datos, jti="j-6d")), ahora) == "audiencia")
+        finally:
+            config.PORTERO_AUDIENCIA = aud_antes
         chequear("★ el revés: de otro emisor (iss) → «emisor»",
                  rechazo(firmar(clave, dict(datos, jti="j-7", iss="otro")), ahora) == "emisor")
         chequear("★ el revés: vencido hace 31 s → «vencido»",
@@ -1478,6 +2130,256 @@ def pruebas_login(chequear):
         for x in (jwks, os.path.join(config.ESTADO, "control_porteria.db")):
             if os.path.exists(x):
                 os.remove(x)
+
+
+def pruebas_panel(chequear):
+    """★ (20-nov) LA PUERTA INTERNA del panel del Coordinador (servidor/panel.py, «contrato del panel v1»): la
+    ficha, X-R2, quién lo pidió, cada ruta y cada acción, con su revés. Y por HTTP de verdad (red.servidor_http)."""
+    import threading
+    import urllib.error
+    import urllib.request
+    from servidor import panel
+    from servidor.cuentas import CUENTA_CLAVES, escribir, ruta_cuenta
+
+    class Red:                                       # (lo que hace servidor/red.py con las conexiones, anotado)
+        def __init__(self):
+            self.enviados, self.cortes = [], []
+
+        def enviar(self, resp):
+            self.enviados += resp
+
+        def cortar(self, n, espera=0):
+            self.cortes.append((n, espera))
+
+    FICHA, QUIEN = "ficha-de-prueba-0123456789", "coordinador:prueba"
+    red = Red()
+
+    def pedir(metodo, ruta, cuerpo=None, ficha=FICHA, r2="1", quien=QUIEN, extra=None, con_red=True):
+        cab = {}
+        if ficha is not None:
+            cab["X-Ficha-Interna"] = ficha
+        if r2 is not None:
+            cab["X-R2"] = r2
+        if quien is not None:
+            cab["X-Coordinador-Quien"] = quien
+        cab.update(extra or {})
+        b = json.dumps(cuerpo).encode("utf-8") if cuerpo is not None else b""
+        return panel.atender(metodo, panel.PREFIJO + "/" + ruta, cab, lambda: b, red if con_red else None)
+
+    def archivo(nombre):
+        return json.load(open(ruta_cuenta(nombre), encoding="utf-8"))
+
+    def texto_1005(x):
+        return x[1][11:37].decode("utf-16-le").rstrip("\0"), x[1][41:].decode("utf-16-le")
+
+    guardado = (config.LOGIN, config.PREFIJO_CUENTA, config.FICHA_INTERNA, config.PANEL_AUDITORIA, config.ENTORNO)
+    config.LOGIN, config.PREFIJO_CUENTA, config.ENTORNO = "pase", "en_", "control"
+    config.PANEL_AUDITORIA = os.path.join(config.CUENTAS, "panel_auditoria.jsonl")
+    A, B, C = "en_10000042", "en_10000043", "en_123"       # C: un número de R2Beat viejo (< 10.000.000)
+    escribir(A, {"nombre": A, "plata": 500, "cash": 10, "monedas": 3, "activo": 0, "pjs": [
+        {"nick": "Panelista", "clase": 1, "exp": EXPS[4], "lugar": 0, "stats": [1, 2, 3, 4, 5], "items": [[1, 1, 10, 1, 1]]},
+        {"nick": "Arquero2", "clase": 2, "exp": 0, "lugar": 2}]})
+    escribir(B, {"nombre": B, "plata": 0, "cash": 0, "monedas": 0, "activo": 0,
+                 "pjs": [{"nick": "Arquera", "clase": 2, "exp": 0, "lugar": 0}]})
+    escribir(C, {"nombre": C, "plata": 1, "cash": 1, "monedas": 1, "activo": 0, "pjs": []})
+    ASIGNADAS.clear()
+    PARTIDAS.clear()
+    ASIGNADAS.update({501: B, 502: "_sin_login"})           # B conectado; 502 todavía sin mostrar su ticket
+    PARTIDAS[501] = {"ip_tcp": "192.0.2.10", "desde": 1_790_000_000}
+    try:
+        # ── la ficha interna ────────────────────────────────────────────────────────────────────
+        config.FICHA_INTERNA = ""
+        chequear("★ sin R2_CUENTAS_FICHA_INTERNA la puerta no existe: 404 aunque traiga una ficha (y con una vacía)",
+                 pedir("GET", "capacidades")[0] == 404 and pedir("GET", "capacidades", ficha="")[0] == 404)
+        config.FICHA_INTERNA = FICHA
+        chequear("con la ficha: capacidades → 200", pedir("GET", "capacidades")[0] == 200)
+        chequear("★ el revés: sin la cabecera, con otra ficha o con la ficha a medias → 404 (como si no existiera)",
+                 [pedir("GET", "capacidades", ficha=f)[0] for f in (None, "otra", FICHA[:-1], FICHA + "x")]
+                 == [404, 404, 404, 404])
+        chequear("★ con la ficha pero llegado por un proxy (X-Forwarded-For) → 404",
+                 pedir("GET", "capacidades", extra={"X-Forwarded-For": "198.51.100.7"})[0] == 404)
+        # ── capacidades: EXACTAMENTE lo implementado ────────────────────────────────────────────
+        cod, cap = pedir("GET", "capacidades")
+        chequear("capacidades: eda, versión 1, su entorno; acciones = ver, aviso, echar, moneda",
+                 (cap["juego"], cap["version"], cap["entorno"], cap["acciones"])
+                 == ("eda", 1, "control", ["ver", "aviso", "echar", "moneda"]), cap["acciones"])
+        chequear("las monedas son las de panel.MONEDAS y cada una es una clave que la CUENTA guarda (CUENTA_CLAVES)",
+                 [m["id"] for m in cap["monedas"]] == [m["id"] for m in panel.MONEDAS]
+                 and all(m["campo"] in CUENTA_CLAVES for m in panel.MONEDAS) and all(m["nombre"] for m in cap["monedas"]))
+        cod, cap2 = pedir("GET", "capacidades", con_red=False)
+        chequear("★ el revés: sin las conexiones (sin red.py) no ofrece aviso ni echar, y esas rutas dan 404",
+                 cap2["acciones"] == ["ver", "moneda"]
+                 and pedir("POST", "aviso", {"texto": "hola", "a": "todos"}, con_red=False)[0] == 404
+                 and pedir("POST", "echar", {"id": B}, con_red=False)[0] == 404, cap2["acciones"])
+        chequear("★ una ruta que no está (banear, PUT, ficha sin id, otra puerta) → 404",
+                 [pedir("GET", "banear")[0], pedir("POST", "banear", {"id": A})[0], pedir("PUT", "capacidades")[0],
+                  pedir("GET", "ficha/")[0], pedir("GET", "ficha/../../porteria")[0],
+                  panel.atender("GET", "/interno/panelx/capacidades", {"X-Ficha-Interna": FICHA}, red=red)[0]]
+                 == [404] * 6)
+        # ── X-R2 y quién ────────────────────────────────────────────────────────────────────────
+        chequear("★ un POST sin X-R2: 1 → 403 (y con X-R2: 0 también); no cambia nada",
+                 pedir("POST", "moneda", {"id": A, "moneda": "oro", "cantidad": 1}, r2=None)[0] == 403
+                 and pedir("POST", "moneda", {"id": A, "moneda": "oro", "cantidad": 1}, r2="0")[0] == 403
+                 and archivo(A)["plata"] == 500)
+        chequear("★ un POST sin X-Coordinador-Quien → 400 (no se puede anotar quién lo pidió); no cambia nada",
+                 pedir("POST", "moneda", {"id": A, "moneda": "oro", "cantidad": 1}, quien=None)[0] == 400
+                 and archivo(A)["plata"] == 500)
+        chequear("un cuerpo que no es JSON → 400", panel.atender(
+            "POST", panel.PREFIJO + "/moneda", {"X-Ficha-Interna": FICHA, "X-R2": "1", "X-Coordinador-Quien": QUIEN},
+            lambda: b"{no", red)[0] == 400)
+
+        # ── buscar ──────────────────────────────────────────────────────────────────────────────
+        def ids(q):
+            return [f["id"] for f in pedir("GET", "buscar?q=" + q)[1]["filas"]]
+        chequear("buscar por una parte del apodo (sin mayúsculas), también de un personaje que no es el activo",
+                 ids("nelis") == [A] and ids("PANELIS") == [A] and ids("quero2") == [A], (ids("nelis"), ids("quero2")))
+        chequear("buscar por la cuenta del juego y por el Eñeños ID", ids(B) == [B] and ids("10000042") == [A])
+        chequear("★ el revés: lo que no está → nada; vacío → nada; un número de R2Beat viejo (< 10.000.000) no es un Eñeños ID",
+                 ids("zzzz") == [] and ids("") == [] and ids("123") == [], ids("123"))
+        fila = pedir("GET", "buscar?q=" + B)[1]["filas"][0]
+        chequear("cada fila: id, nick, enenos_id, conectado, resumen",
+                 fila == {"id": B, "nick": "Arquera", "enenos_id": 10000043, "conectado": True,
+                          "resumen": "Nivel 1 · Cazador (Hunter) · 1 personaje"}, fila)
+        for k in range(panel.TOPE_BUSCAR + 5):
+            escribir("en_%d" % (20000000 + k), {"nombre": "en_%d" % (20000000 + k), "activo": 0,
+                                                 "pjs": [{"nick": "Tope%02d" % k, "clase": 1, "exp": 0, "lugar": 0}]})
+        chequear("buscar tiene tope de %d (había %d)" % (panel.TOPE_BUSCAR, panel.TOPE_BUSCAR + 5),
+                 len(ids("tope")) == panel.TOPE_BUSCAR)
+        chequear("★ el revés: el tope no corta una búsqueda chica", ids("Tope07") == ["en_20000007"])
+        # ── conectados y salud ──────────────────────────────────────────────────────────────────
+        cod, con = pedir("GET", "conectados")
+        chequear("conectados: sólo los que entraron (no la conexión sin ticket), con IP, desde, dónde y Eñeños ID",
+                 con["filas"] == [{"id": B, "nick": "Arquera", "enenos_id": 10000043, "donde": "en el lobby",
+                                   "desde": 1_790_000_000, "ip": "192.0.2.10"}], con)
+        cod, sal = pedir("GET", "salud")
+        chequear("salud: en línea, 1 jugando, con su detalle en palabras",
+                 sal["en_linea"] is True and sal["jugando"] == 1
+                 and all(set(d) == {"nombre", "valor"} for d in sal["detalle"]), sal["jugando"])
+        # ── la ficha ────────────────────────────────────────────────────────────────────────────
+        cod, f = pedir("GET", "ficha/" + A)
+        campos = {c["nombre"]: c["valor"] for c in f["campos"]}
+        chequear("ficha: el personaje activo, nivel %d (de su EXP), clase, monedas de la cuenta, sus 2 personajes" % nivel(EXPS[4]),
+                 cod == 200 and f["nick"] == "Panelista" and f["enenos_id"] == 10000042 and f["conectado"] is False
+                 and campos["Nivel"] == nivel(EXPS[4]) and campos["Clase"] == "Guerrero (Warrior)"
+                 and campos["Fuerza · Constitución · Destreza · Inteligencia · Sabiduría"] == "1 · 2 · 3 · 4 · 5"
+                 and f["monedas"] == {"oro": 500, "cash": 10, "monedas_revivir": 3}
+                 and f["personajes"] == [{"id": A + ".0", "nick": "Panelista"}, {"id": A + ".2", "nick": "Arquero2"}],
+                 (cod, campos.get("Nivel"), f.get("monedas")))
+        cod2, f2 = pedir("GET", "ficha/" + A + ".2")
+        chequear("ficha/<cuenta>.<lugar>: ese personaje (Arquero2, Cazador)",
+                 cod2 == 200 and f2["nick"] == "Arquero2"
+                 and {c["nombre"]: c["valor"] for c in f2["campos"]}["Clase"] == "Cazador (Hunter)")
+        chequear("★ el revés: una cuenta que no existe, un lugar vacío, un nombre con ruta → 404",
+                 [pedir("GET", "ficha/" + x)[0] for x in ("en_999", A + ".4", "..", "en_1/../x")] == [404] * 4)
+        chequear("ficha de una cuenta sin personajes (y un Eñeños ID que no es: None)",
+                 pedir("GET", "ficha/" + C)[1]["enenos_id"] is None and pedir("GET", "ficha/" + C)[1]["personajes"] == [])
+        todo = json.dumps([pedir("GET", r)[1] for r in ("ficha/" + A, "ficha/" + B, "conectados", "buscar?q=e", "salud")])
+        chequear("★ ninguna respuesta lleva la ficha interna, tickets ni contraseñas",
+                 FICHA not in todo and not re.search(r'"(ticket|pase|pass\w*|hash|clave)"', todo))
+        # ── moneda ──────────────────────────────────────────────────────────────────────────────
+        cod, r = pedir("POST", "moneda", {"id": A, "moneda": "oro", "cantidad": 250})
+        chequear("moneda: +250 de oro a un desconectado → antes 500, después 750, y queda en su archivo (sus personajes intactos)",
+                 (cod, r) == (200, {"ok": True, "antes": 500, "despues": 750}) and archivo(A)["plata"] == 750
+                 and [p["nick"] for p in archivo(A)["pjs"]] == ["Panelista", "Arquero2"], (cod, r))
+        ultima = json.loads(open(config.PANEL_AUDITORIA, encoding="utf-8").read().splitlines()[-1])
+        chequear("se anota con quién lo pidió (auditoría y movimientos de la ficha)",
+                 (ultima["quien"], ultima["accion"], ultima["id"]) == (QUIEN, "moneda", A)
+                 and pedir("GET", "ficha/" + A)[1]["movimientos"][0]["quien"] == QUIEN, ultima)
+        chequear("★ nunca negativo: quitar 751 de 750 → 409 y no cambia",
+                 pedir("POST", "moneda", {"id": A, "moneda": "oro", "cantidad": -751})[0] == 409
+                 and archivo(A)["plata"] == 750)
+        chequear("…y quitar justo 750 → 0 (el borde vale)",
+                 pedir("POST", "moneda", {"id": A, "moneda": "oro", "cantidad": "-750"})[1].get("despues") == 0
+                 and archivo(A)["plata"] == 0)
+        chequear("★ el tope de las monedas para revivir (999): +997 sobre 3 → 409; +996 → 999",
+                 pedir("POST", "moneda", {"id": A, "moneda": "monedas_revivir", "cantidad": 997})[0] == 409
+                 and pedir("POST", "moneda", {"id": A, "moneda": "monedas_revivir", "cantidad": 996})[1].get("despues") == 999)
+        chequear("★ cantidad 0, texto, true, 1.5; moneda inventada → 400; cuenta que no existe → 404",
+                 [pedir("POST", "moneda", {"id": A, "moneda": "oro", "cantidad": x})[0] for x in (0, "abc", True, 1.5, None)]
+                 == [400] * 5 and pedir("POST", "moneda", {"id": A, "moneda": "rcoin", "cantidad": 1})[0] == 400
+                 and pedir("POST", "moneda", {"id": "en_999", "moneda": "oro", "cantidad": 1})[0] == 404)
+        cambia = {}
+        for m in panel.MONEDAS:                      # (lo esperado sale de la tabla, no escrito a mano)
+            antes = archivo(C)[m["campo"]]
+            pedir("POST", "moneda", {"id": C, "moneda": m["id"], "cantidad": 2})
+            cambia[m["id"]] = archivo(C)[m["campo"]] - antes
+        chequear("cada moneda de capacidades cambia SU clave de la cuenta", cambia == {m["id"]: 2 for m in panel.MONEDAS}, cambia)
+        cod, r = pedir("POST", "moneda", {"id": B, "moneda": "oro", "cantidad": 10})
+        chequear("★ a un CONECTADO no se le tocan las monedas: 409 con el motivo, y no cambia",
+                 cod == 409 and "conectado" in r["error"] and archivo(B)["plata"] == 0, r)
+        ASIGNADAS.pop(501)
+        chequear("…y cuando sale, sí (+10)", pedir("POST", "moneda", {"id": B, "moneda": "oro", "cantidad": 10})[1].get("despues") == 10)
+        # ── aviso y echar ───────────────────────────────────────────────────────────────────────
+        ASIGNADAS.update({501: B, 503: A})
+        cod, r = pedir("POST", "aviso", {"texto": "Reinicio en 5 minutos", "a": "todos"})
+        chequear("aviso a todos: llega a los 2 conectados (no a la conexión sin ticket), como línea del chat «[Aviso]»",
+                 (cod, r) == (200, {"ok": True, "llego_a": 2}) and sorted(x[3] for x in red.enviados) == [501, 503]
+                 and all(x[0] == 0x1005 and texto_1005(x) == ("[Aviso]", "Reinicio en 5 minutos") for x in red.enviados),
+                 (cod, r, [x[3] for x in red.enviados]))
+        red.enviados.clear()
+        cod, r = pedir("POST", "aviso", {"texto": "hola", "a": "uno", "id": A})
+        chequear("aviso a uno: sólo a su conexión", (cod, r["llego_a"], [x[3] for x in red.enviados]) == (200, 1, [503]))
+        red.enviados.clear()
+        chequear("★ el revés: a uno que no está → 404; sin texto, con más de %d letras o «a» inventado → 400; nada sale" % panel.TOPE_AVISO,
+                 pedir("POST", "aviso", {"texto": "hola", "a": "uno", "id": C})[0] == 404
+                 and [pedir("POST", "aviso", d)[0] for d in ({"texto": "  ", "a": "todos"}, {"texto": "x" * 201, "a": "todos"},
+                                                             {"texto": "hola", "a": "algunos"})] == [400] * 3
+                 and red.enviados == [])
+        cod, r = pedir("POST", "echar", {"id": B})
+        chequear("echar: corta SU conexión, ya", (cod, r, red.cortes) == (200, {"ok": True}, [(501, 0)]), red.cortes)
+        red.cortes.clear()
+        cod, r = pedir("POST", "echar", {"id": A, "motivo": "lenguaje"})
+        chequear("echar con motivo: primero el aviso con el motivo, y el corte con espera",
+                 cod == 200 and red.cortes == [(503, 1.5)] and "lenguaje" in texto_1005(red.enviados[-1])[1])
+        red.cortes.clear()
+        chequear("★ el revés: echar a uno que no está conectado → 404 y no se corta nada",
+                 pedir("POST", "echar", {"id": C})[0] == 404 and red.cortes == [])
+        acc = [json.loads(x)["accion"] for x in open(config.PANEL_AUDITORIA, encoding="utf-8").read().splitlines()]
+        chequear("la auditoría tiene cada cambio (moneda, aviso, echar) y ninguno de los rechazados",
+                 {"moneda", "aviso", "echar"} <= set(acc) and acc.count("echar") == 2 and acc.count("aviso") == 2, acc)
+        # ── por HTTP de verdad (servidor/red.py) ────────────────────────────────────────────────
+        from servidor import red as R
+        juego_real, R.juego = R.juego, (lambda: None)        # (sin recargar servidor/: perdería lo de la prueba)
+        abrir = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+
+        def http(puerto, metodo, ruta, cab=None, cuerpo=None):
+            req = urllib.request.Request("http://127.0.0.1:%d%s" % (puerto, ruta), method=metodo, data=cuerpo,
+                                         headers=cab or {})
+            try:
+                with abrir(req, timeout=5) as rr:
+                    return rr.status, json.loads(rr.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read() or b"{}")
+        srvs = [R.servidor_http(("127.0.0.1", 0)), R.servidor_http(("127.0.0.1", 0), solo_panel=True)]
+        for s in srvs:
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        try:
+            uno, solo = (s.server_address[1] for s in srvs)
+            bien = {"X-Ficha-Interna": FICHA}
+            cod, cap = http(uno, "GET", "/interno/panel/capacidades", bien)
+            chequear("HTTP: capacidades con la ficha → 200, con aviso y echar (las conexiones de red.py)",
+                     cod == 200 and cap["acciones"] == ["ver", "aviso", "echar", "moneda"], (cod, cap))
+            sin, nada = http(uno, "GET", "/interno/panel/capacidades"), http(uno, "GET", "/no/existe")
+            chequear("★ HTTP: sin la ficha → 404, igual que una ruta que no existe", sin == nada and sin[0] == 404, (sin, nada))
+            cod, r = http(uno, "POST", "/interno/panel/moneda", dict(bien, **{"Content-Type": "application/json"}),
+                          json.dumps({"id": A, "moneda": "oro", "cantidad": 1}).encode())
+            chequear("★ HTTP: un POST sin X-R2 → 403", cod == 403, (cod, r))
+            cod, r = http(uno, "POST", "/interno/panel/moneda", dict(bien, **{"X-R2": "1", "X-Coordinador-Quien": QUIEN}),
+                          b"x" * (panel.TOPE_CUERPO + 1))
+            chequear("★ HTTP: un cuerpo de más de %d bytes → 413" % panel.TOPE_CUERPO, cod == 413, cod)
+            chequear("HTTP: el login sigue igual (/eda/salud → 200)", http(uno, "GET", "/eda/salud")[0] == 200)
+            chequear("el HTTP aparte (EDA_PANEL_ESCUCHAR): el panel sí; ★ el revés: el login ahí no existe",
+                     http(solo, "GET", "/interno/panel/salud", bien)[0] == 200 and http(solo, "GET", "/eda/salud")[0] == 404
+                     and http(solo, "POST", "/eda/pase", {}, b"{}")[0] == 404)
+        finally:
+            for s in srvs:
+                s.shutdown()
+                s.server_close()
+            R.juego = juego_real
+    finally:
+        (config.LOGIN, config.PREFIJO_CUENTA, config.FICHA_INTERNA, config.PANEL_AUDITORIA, config.ENTORNO) = guardado
+        ASIGNADAS.clear()
+        PARTIDAS.clear()
 
 
 # El casillero de EQUIPO de cada familia de ítem (medido con el 0x102D, MEDICIONES §27)
