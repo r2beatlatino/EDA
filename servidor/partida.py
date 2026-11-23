@@ -2,6 +2,7 @@ r"""servidor/partida.py -- la PARTIDA: cargar, morir y revivir, el final de la s
 y el premio. Y el «estoy vivo» (0x1001), que es por donde sale lo pendiente por tiempo.
 """
 import json
+import math
 import os
 import random
 import re
@@ -10,7 +11,7 @@ import time
 
 from servidor import config
 from servidor.registro import maneja
-from servidor.estado import SALAS, partida, numero
+from servidor.estado import PARTIDAS, SALAS, partida, numero
 from servidor.cuentas import guardar, nivel
 from servidor.datos import ESCENARIOS, NADA, PRECIOS, RANKRATE, puntos_de, tabla_premios
 from servidor.objetos import inventario, libre_en_bolsa, registro_item, serial_nuevo
@@ -82,7 +83,7 @@ def cerrar_por_bajas(p, conexion):
             or p.get("resultado_guardado")):
         return []
     s = SALAS.get(p.get("sala"))
-    if not (s and s["miembros"] == [conexion]):
+    if not (s and s.get("anfitrion") == conexion):
         return []
     from servidor.cuentas import leer
     p["cierre_bajas"] = None
@@ -118,6 +119,9 @@ def termino_su_stage(s, conexion):
         s.setdefault("cargados", set()).clear()
         s.pop("largada", None)
         s.pop("carga_desde", None)
+        s.pop("traspaso_master", None)
+        s.pop("ultima_baja_stage", None)
+        s.pop("bajas_stage", None)
 
 
 def dejar_la_sala(p, conexion):
@@ -174,7 +178,8 @@ def cuerpo_1072(conexion, p):
 @maneja(0x105F)
 def termino_de_cargar(cmd, cuerpo, conexion, c, p):
     """terminó de cargar: corre el reloj"""
-    p.update(inicio=time.time(), muertos=0, golpes=0, revividas=0, resultado_guardado=False,
+    ahora = time.time()
+    p.update(inicio=ahora, ultimo_mensaje=ahora, muertos=0, golpes=0, revividas=0, resultado_guardado=False,
              bajas_stage=set(), cierre_bajas=None)
     if p.get("escenario") in ESCENARIOS:
         print(f"[bajas] Stage {p['escenario']}: 0/{ESCENARIOS[p['escenario']][3]}", flush=True)
@@ -190,14 +195,16 @@ def termino_de_cargar(cmd, cuerpo, conexion, c, p):
         return [(0x106C, struct.pack("<BB", i, i), 0, n) for n in destinos for i in total]
     # ★ con varios: la largada (0x105E) recién cuando cargaron TODOS, y a todos juntos
     s = SALAS.get(p.get("sala"))
-    if s and conexion in s["miembros"] and len(s["miembros"]) > 1 and s.get("jugando"):
+    en_sala_activa = s and conexion in s["miembros"] and s.get("jugando")
+    if en_sala_activa:
+        s.setdefault("cargados", set()).add(conexion)
+    if en_sala_activa and len(s["miembros"]) > 1:
         if s.get("largada"):
             # ★ (20-nov) ya se largó (por tiempo o porque los demás estaban): el que llega tarde larga
             #   SOLO él. Antes se repetía el 0x105E a TODOS (una 2.ª largada en plena stage).
             print("[carga] sala %s: #%d terminó de cargar después de la largada: larga sólo él"
                   % (p.get("sala"), conexion), flush=True)
             return [(0x105E, struct.pack("<HI", 1, 600), 0)] + activar([conexion], [numero(s, conexion)])
-        s.setdefault("cargados", set()).add(conexion)
         s.setdefault("carga_desde", time.monotonic())
         return largar_si_cargaron(s)
     return [(0x105E, struct.pack("<HI", 1, 600), 0)] + activar([conexion], [numero_jugador(conexion)])
@@ -238,19 +245,179 @@ def vigilar_cargas(salas):
     return r
 
 
+# ★ (22-nov, multijugador) cuánto tiempo sin ningún mensaje del máster en plena stage (ni el 0x1001 de cada 20 s
+#   ni eventos 0x105C/0x1061) antes de darlo por colgado y pasarle el mando al siguiente (sin cerrar la stage).
+ESPERA_MASTER = float(os.environ.get("EDA_ESPERA_MASTER") or 60)
+
+# ★ (22-nov) guardia de stage trabada: sólo DESPUÉS de un traspaso de máster en una stage en grupo (nunca en una
+#   partida normal ni en solitario). Si pasan STAGE_TRABADA_POCAS s (45) con pocas bajas por hacer, o STAGE_TRABADA s
+#   (90) con muchas, sin ninguna baja nueva (0x1061) desde el traspaso o desde la última baja:
+#     · si faltan pocas bajas (faltan <= max(2, ceil(5 % de MONSTER_CNT)), o EDA_STAGE_TRABADA_FALTAN; p. ej. 76/78
+#       en P-20261122-162832-s1) → cuenta como terminada con pago normal;
+#     · si faltan más (p. ej. 0/56 en P-20261122-163025-s2) → cierre limpio por el camino de game_over (0x1069 +
+#       0x1075), sin premio, sin EXP extra, sin desbloqueo y sin sumar abandono.
+STAGE_TRABADA = float(os.environ.get("EDA_STAGE_TRABADA") or 90)
+# ★ (22-nov, decisión del dueño) con POCAS bajas por hacer, la espera es más corta: equivocarse ahí sólo adelanta un
+#   fin que igual se paga. Medido en TEST (22-nov): en partidas normales hubo huecos de hasta 59 s sin bajas, por eso
+#   con MUCHAS por hacer (cierre sin premio) se espera STAGE_TRABADA.
+STAGE_TRABADA_POCAS = float(os.environ.get("EDA_STAGE_TRABADA_POCAS") or 45)
+STAGE_TRABADA_FALTAN = (int(os.environ["EDA_STAGE_TRABADA_FALTAN"])
+                        if os.environ.get("EDA_STAGE_TRABADA_FALTAN") else None)
+
+
+def tope_faltan_trabada(mc):
+    if STAGE_TRABADA_FALTAN is not None:
+        return int(STAGE_TRABADA_FALTAN)
+    v = os.environ.get("EDA_STAGE_TRABADA_FALTAN")
+    if v is not None and v.strip() != "":
+        return int(v)
+    return max(2, math.ceil(mc * 0.05))
+
+
+def activar_guardia_traspaso(s, master_anterior, ahora=None):
+    """Marca en la sala que hubo traspaso de máster en plena stage y conserva el progreso de bajas del equipo."""
+    ahora = time.time() if ahora is None else ahora
+    pm_ant = PARTIDAS.get(master_anterior) or {}
+    if pm_ant.get("bajas_stage"):
+        s.setdefault("bajas_stage", set()).update(pm_ant["bajas_stage"])
+    s["muertos_stage"] = max(s.get("muertos_stage", 0), pm_ant.get("muertos", 0),
+                             len(s.get("bajas_stage", ())))
+    nuevo = s.get("anfitrion")
+    if nuevo is not None:
+        pm_nuevo = partida(nuevo)
+        if s.get("bajas_stage"):
+            pm_nuevo.setdefault("bajas_stage", set()).update(s["bajas_stage"])
+        pm_nuevo["muertos"] = max(pm_nuevo.get("muertos", 0), s["muertos_stage"])
+    s["traspaso_master"] = ahora
+    s["ultima_baja_stage"] = ahora
+
+
+def vigilar_stage_trabada(salas, ahora=None):
+    """Del `tick`: sólo en una stage en grupo que ya tuvo traspaso de máster, si pasan STAGE_TRABADA s sin ninguna
+    baja nueva (0x1061) contados desde el traspaso o desde la última baja:
+      · si faltan <= tope_faltan_trabada(MONSTER_CNT) → cierre como terminada con pago normal;
+      · si faltan más → cierre por el camino de game_over (0x1069 + 0x1075), sin premio, sin EXP extra,
+        sin desbloqueo y sin abandono."""
+    ahora = time.time() if ahora is None else ahora
+    r = []
+    from servidor.cuentas import leer
+    for num, s in list(salas.items()):
+        if not (s.get("jugando") and s.get("largada") and s.get("traspaso_master")):
+            continue
+        quedan = [m for m in list(s["miembros"]) if m in s.get("en_stage", ())
+                  and not partida(m).get("resultado_guardado")]
+        if not quedan:
+            continue
+        desde = s.get("ultima_baja_stage")
+        if desde is None:
+            desde = s["traspaso_master"]
+        if ahora - desde < min(STAGE_TRABADA, STAGE_TRABADA_POCAS):
+            continue
+        anf = s.get("anfitrion") if s.get("anfitrion") in quedan else quedan[0]
+        pm = partida(anf)
+        esc = pm.get("escenario")
+        if not esc and len(s.get("sala", b"")) >= 0x2A:
+            esc = struct.unpack_from("<H", s["sala"], 0x28)[0]
+        esc = esc if esc in ESCENARIOS else 1011
+        total = ESCENARIOS[esc][3]
+        bajas_hechas = max(len(s.get("bajas_stage", ())), s.get("muertos_stage", 0),
+                           max((partida(m).get("muertos", 0) for m in quedan), default=0),
+                           max((len(partida(m).get("bajas_stage", ())) for m in quedan), default=0))
+        faltan = max(0, total - bajas_hechas)
+        tope = tope_faltan_trabada(total)
+        if ahora - desde < (STAGE_TRABADA_POCAS if faltan <= tope else STAGE_TRABADA):
+            continue
+        pid = s.get("partida_id", "?")
+        if faltan <= tope:
+            for m in quedan:
+                pm_m = partida(m)
+                pm_m["escenario"] = pm_m.get("escenario") or esc
+                pm_m["muertos"] = max(pm_m.get("muertos", 0), bajas_hechas)
+                r += [(x[0], x[1], x[2], m) for x in _fin_de_uno(0x1064, b"", m, leer(m), pm_m)]
+            print("partida %s: stage %s trabada tras traspaso (%d/%d bajas, faltan %d <= %d) → "
+                  "se cierra como terminada para %s"
+                  % (pid, esc, bajas_hechas, total, faltan, tope, ", ".join("#%s" % m for m in quedan)),
+                  flush=True)
+        else:
+            for m in quedan:
+                pm_m = partida(m)
+                pm_m["cierre_bajas"] = None
+                pm_m["cartas_hasta"] = None
+                pm_m.setdefault("sala", num)
+                termino_su_stage(s, m)
+            salen = set(quedan)
+            for m in quedan:
+                for x in game_over(leer(m), partida(m), m):
+                    if x[0] == 0x1058 and len(x) > 3 and x[3] in salen:
+                        continue
+                    r.append(x)
+            print("partida %s: stage %s trabada tras traspaso (%d/%d bajas, faltan %d > %d) → "
+                  "cierre sin premio para %s"
+                  % (pid, esc, bajas_hechas, total, faltan, tope, ", ".join("#%s" % m for m in quedan)),
+                  flush=True)
+    return r
+
+
+def vigilar_master(salas, ahora=None):
+    """Del `tick`:
+    1) revisa la guardia de stage trabada (sólo después de un traspaso de máster);
+    2) si el máster de una stage en grupo se cuelga (no manda ni el 0x1001 de cada 20 s ni eventos de la stage
+       durante ESPERA_MASTER s), NO se cierra la stage: se le pasa el mando al siguiente (0x1058 tipo 3 a los demás,
+       como si se hubiera ido) y desde ahí rige la guardia de stage trabada."""
+    ahora = time.time() if ahora is None else ahora
+    r = vigilar_stage_trabada(salas, ahora=ahora)
+    for num, s in list(salas.items()):
+        if not (s.get("jugando") and s.get("largada") and len(s.get("en_stage", ())) >= 2):
+            continue
+        m = s.get("anfitrion")
+        if m not in s.get("en_stage", ()):
+            continue
+        pm = PARTIDAS.get(m) or {}
+        ultimo = pm.get("ultimo_mensaje") or pm.get("inicio") or ahora
+        if ahora - ultimo >= ESPERA_MASTER:
+            otros = [o for o in s["miembros"] if o != m and o in s.get("en_stage", ())]
+            if not otros:
+                continue
+            inactivo = int(ahora - ultimo)
+            pid = s.get("partida_id", "?")
+            pm = partida(m)
+            pm["inicio"] = None
+            pm["game_over_en"] = None
+            pm["cierre_bajas"] = None
+            pm["cartas_hasta"] = None
+            pm.setdefault("sala", num)
+            termino_su_stage(s, m)
+            r += dejar_la_sala(pm, m)
+            activar_guardia_traspaso(s, m, ahora=ahora)
+            print("partida %s: el máster #%s no responde (%d s) → traspaso de mando a #%s (la stage sigue)"
+                  % (pid, m, inactivo, s.get("anfitrion")), flush=True)
+    return r
+
+
 @maneja(0x1061)
 def npc_muerto(cmd, cuerpo, conexion, c, p):
     """un NPC muerto [§5.11]: `u8 n · u8 1 · 6 × 0` (n = el NPC). ★ (21-nov) con varios lo manda sólo el máster
     (`0x639AA0`): las bajas son de la partida (`muertos_stage` de la sala), para el resultado de todos."""
-    p["muertos"] = p.get("muertos", 0) + 1
     s_ = SALAS.get(p.get("sala"))
+    if s_ and s_.get("jugando") and (conexion not in s_.get("en_stage", s_["miembros"])
+                                     or s_.get("anfitrion") != conexion):
+        return []
+    p["muertos"] = p.get("muertos", 0) + 1
     if s_ and s_.get("jugando") and conexion in s_["miembros"]:
         s_["muertos_stage"] = s_.get("muertos_stage", 0) + 1
+        s_["ultima_baja_stage"] = time.time()
     esc = p.get("escenario")
+    if not esc and s_ and len(s_.get("sala", b"")) >= 0x2A:
+        esc = struct.unpack_from("<H", s_["sala"], 0x28)[0]
     if esc in ESCENARIOS and p.get("inicio") and len(cuerpo) >= 2 and not p.get("resultado_guardado"):
         bajas = p.setdefault("bajas_stage", set())
+        if s_ and s_.get("jugando") and conexion in s_["miembros"]:
+            bajas.update(s_.setdefault("bajas_stage", set()))
         antes = len(bajas)
-        bajas.add(struct.unpack_from("<H", cuerpo)[0])
+        npc = struct.unpack_from("<H", cuerpo)[0]
+        bajas.add(npc)
+        if s_ and s_.get("jugando") and conexion in s_["miembros"]:
+            s_["bajas_stage"].add(npc)
         total = ESCENARIOS[esc][3]
         if len(bajas) != antes:
             print(f"[bajas] Stage {esc}: {len(bajas)}/{total}. Restantes según catálogo: "
@@ -259,7 +426,7 @@ def npc_muerto(cmd, cuerpo, conexion, c, p):
         #   `resultado_guardado` lo frena; si llega tarde, el 0x1064 no paga dos veces.
         #   🟡 la espera es nuestra (3 s en 1-4 Fácil, la medida; 8 s en las demás)
         s = SALAS.get(p.get("sala"))
-        if (s and s["miembros"] == [conexion] and len(bajas) >= total
+        if (s and s.get("anfitrion") == conexion and len(bajas) >= total
                 and p.get("cierre_bajas") is None):
             p["cierre_bajas"] = time.monotonic() + (3 if esc == 1041 else 8)
     return []
@@ -276,19 +443,18 @@ def en_la_stage(s, conexion):
 
 @maneja(0x1063)
 def le_pegaron(cmd, cuerpo, conexion, c, p):
-    """★ le pegaron (0x1063 C→S / 0x1062 S→C `0x547440`, aporte de Hysteria-xyz):
-    Difunde la vida y maná actualizados al HUD de los compañeros de equipo."""
+    """★ le pegaron (0x1063 C→S, `0x500790` → `0x546350`, 3 B: u8 jugador · u16 golpes):
+    Cada 10 golpes recibidos (`inc word [eax+0xF]; idiv 10`), el cliente avisa al server para el contador
+    `golpes` del resultado final (`0x106E`).
+    ⚠ (22-nov, medido en `EDA_limpio.exe` tras caída en P-20261122-235248-s1 a las 23:55:24): NO responder con
+    `0x1062` (`0x547440`). En el exe, `0x547440` NO es vida/maná: lee `buf+0` como ID de actor NPC muerto y `buf+4`
+    como slot del jugador que lo mató; si `buf+4 != [cuenta+0x705]`, busca ese slot en `cuenta+0x240` (`0x61C110`)
+    y en `0x5475A5` (`cmp byte [eax+0x73], cl`) desreferencia `eax+0x73` sin comprobar `NULL` (además de buscar los
+    dos actores en `0x9348C8` con `0x5706D0` y desreferenciarlos en `0x6360F0` sin comprobar `NULL`). Mandar `0x1062`
+    con `buf+4 = 0` fijo hacía que, tras salir el anfitrión original (slot 0, borrado de `cuenta+0x240` por `0x61CA30`
+    en el `0x1058` tipo 3), el primer `0x1063` de un compañero tirara el juego del nuevo máster (`0xC0000005`)."""
     p["golpes"] = p.get("golpes", 0) + 1
-    s = SALAS.get(p.get("sala"))
-    r = []
-    if s and conexion in s["miembros"] and len(s["miembros"]) > 1:
-        yo = numero(s, conexion)
-        # 0x1062 (16 B, 0x547440): u32 jugador_id · u32 0 · u16 HP · u8 0 · u32 MP · u8 buffs
-        hp = struct.unpack_from("<H", cuerpo, 1)[0] if len(cuerpo) >= 3 else 1000
-        msg_62 = struct.pack("<IIHBI B", yo, 0, hp, 0, 100, 0)
-        for m in en_la_stage(s, conexion):
-            r.append((0x1062, msg_62, 0, m))
-    return r
+    return []
 
 
 @maneja(0x1062)

@@ -7,8 +7,9 @@ import time
 from servidor import config
 from servidor.config import P
 from servidor.registro import maneja
-from servidor.estado import ASIGNADAS, SALAS, VIVO, partida, numero, dar_numero, de_numero
-from servidor.cuentas import leer, nivel, nombre_visible, guardar, EXPS, INICIO
+from servidor.estado import ASIGNADAS, PARTIDAS, SALAS, VIVO, partida, numero, dar_numero, de_numero
+from servidor.cuentas import fijar_dato_personaje, leer, nivel, nombre_visible, guardar, EXPS, INICIO
+from servidor.datos import ESCENARIOS
 from servidor.objetos import equipo_tipos, obj_habilidad, personaje_obj
 from servidor import relay
 from servidor.relay import dir_udp, identidad_de
@@ -94,7 +95,13 @@ def miembro(c, indice, completo=False, conexion=None, para=None, listo=False):
     return bytes(m)
 
 
-def pares(s, espera=0, anotar=True):
+# ★ (22-nov) En una sala que ESPERA (`jugando` en False), cada cuántos segundos sin 0x1059 se vuelve a mandar el
+#   0x1059 (`+0x2DF = 3`, mismas direcciones) para que el cliente repita su medición (`0x550D6B` → `0x534D50` →
+#   `0x535000` → `0x4DC330`) y mande `0x105A` si un NAT cambió de puerto y quedó en -1000 ms.
+REMEDIR_SALA = float(os.environ.get("EDA_REMEDIR_SALA") or 60)
+
+
+def pares(s, espera=0, anotar=True, ahora=None):
     """★ 0x1059 «Peer Public IP» (`0x550BE0`) a CADA miembro de la sala: las direcciones UDP de
     todos, para el P2P (el ping de la sala, la partida). 7 B: u8 N · 4 B 🟡 · u8 → +0x2DE · u8 →
     +0x2DF; y N × 7 B: u8 id · u32 IP · u16 puerto, COMO ENTEROS (el cliente les hace htonl /
@@ -121,28 +128,82 @@ def pares(s, espera=0, anotar=True):
                               else "casa (privada)" if udp == tuple(partida(n).get("privada") or ())
                               else "directo (pública)")
                     print("sala: a #%s le doy #%s por %s" % (dest, n, camino), flush=True)
-        cuerpo = struct.pack("<B4xBB", len(regs), 0, 0) + b"".join(regs)
-        s.setdefault("anunciado", {})[dest] = cuerpo         # (21-nov) lo último que se le dio: ver `reanunciar`
+        # ★ (22-nov) +0x2DE = listo del destinatario (para no apagarle su botón Ready), y +0x2DF = 3:
+        #   en el exe (`0x550D6B` → `0x534D50` → `0x535000` → `0x4DC330`), 1 s después de saludar por UDP
+        #   mide si conectó con el anfitrión (`0x748120`) y manda `0x105A` (si sigue en -1000 ms, timeouts = 2)
+        listo_dest = 1 if dest in s.get("listos", ()) else 0
+        cuerpo = struct.pack("<B4xBB", len(regs), listo_dest, 3) + b"".join(regs)
+        s.setdefault("anunciado", {})[dest] = b"".join(regs)         # (21-nov) lo último que se le dio: ver `reanunciar`
         r.append((0x1059, cuerpo, espera, dest))
+    if anotar:
+        s["anunciado_en"] = time.time() if ahora is None else ahora
     return r
 
 
-def reanunciar(salas):
-    """★ (21-nov) Del `tick`: si en una sala que ESPERA (no jugando) la dirección de alguien cambió (su NAT le dio
-    otro puerto, llegó su 0x3006 de esta sesión, o se olvidó una vieja), se les vuelve a dar el 0x1059 a los que
-    les cambió. Antes se daba una sola vez, al entrar: con una dirección que cambiaba, el otro le seguía hablando
-    a la vieja."""
+def reanunciar(salas, ahora=None, por_tiempo=True):
+    """★ (21-nov / 22-nov) Del `tick`: sólo en una sala que ESPERA (`jugando` en False; nunca durante la carga ni
+    en plena stage):
+      1) si la dirección de alguien cambió (su NAT le dio otro puerto, llegó su 0x3006 de esta sesión, o un par
+         pasó al relay por 0x105A), se les vuelve a dar el 0x1059 a los que les cambió;
+      2) si `por_tiempo` y pasaron más de `REMEDIR_SALA` s (60 s) desde el último 0x1059 de la sala, se les vuelve
+         a mandar el 0x1059 (mismas direcciones, `+0x2DF = 3`) para que el cliente repita su medición y mande
+         `0x105A` si un puerto cambió y quedó en -1000 ms."""
+    ahora = time.time() if ahora is None else ahora
     r = []
     for s in list(salas.values()):
         if s.get("jugando") or len(s["miembros"]) < 2 or "anunciado" not in s:
             continue
         antes = dict(s["anunciado"])
-        nuevos = pares(s, anotar=False)
+        ultimo = s.get("anunciado_en")
+        if ultimo is None:
+            ultimo = s["anunciado_en"] = ahora
+        nuevos = pares(s, anotar=False, ahora=ahora)
+        cambiados = []
         for x in nuevos:
-            if antes.get(x[3]) != x[1]:
+            if antes.get(x[3]) != x[1][7:]:
                 print("sala: a #%s le cambió una dirección de su sala: 0x1059 otra vez" % x[3], flush=True)
-                r.append(x)
+                cambiados.append(x)
+        if cambiados:
+            s["anunciado_en"] = ahora
+            r.extend(cambiados)
+        elif por_tiempo and REMEDIR_SALA > 0 and ahora - ultimo >= REMEDIR_SALA:
+            s["anunciado_en"] = ahora
+            r.extend(nuevos)
     return r
+
+
+@maneja(0x105A)
+def reporte_ping_udp(cmd, cuerpo, conexion, c, p):
+    """★ (22-nov) 0x105A C→S (`0x4DC330`, 9 B: u32 id_cuenta · f32 ping_s · u8 timeouts):
+    1 s después del 0x1059 (con +0x2DF = 3), el invitado mide con `0x748120` si conectó por UDP con el
+    anfitrión. Si el directo falló (-1000 ms, «[UDP ERROR] PingError! PingInfo Not Collect!!!»), manda
+    timeouts = 2 (`0x4DC453`). El server marca SOLO ese par sin directo y les manda el 0x1059 por el relay."""
+    if len(cuerpo) >= 9:
+        id_cuerpo, ping, timeouts = struct.unpack_from("<IfB", cuerpo, 0)
+    elif len(cuerpo) >= 1:
+        id_cuerpo, ping, timeouts = 0, -1.0, cuerpo[0]
+    else:
+        return []
+    s = SALAS.get(p.get("sala"))
+    if not s or conexion not in s["miembros"]:
+        return []
+    if timeouts >= 2 or ping < 0:
+        anf = s.get("anfitrion")
+        if id_cuerpo and id_cuerpo != conexion and id_cuerpo in s["miembros"]:
+            otros = [id_cuerpo]
+        elif anf and anf != conexion and anf in s["miembros"]:
+            otros = [anf]
+        else:
+            otros = [m for m in s["miembros"] if m != conexion]
+        for otro in otros:
+            relay.marcar_sin_directo(conexion, otro)
+        print("sala %s: #%s reportó fallo de UDP directo (0x105A, timeouts=%d) → pasa al relay"
+              % (p.get("sala"), conexion, timeouts), flush=True)
+        if not s.get("jugando") and len(s["miembros"]) >= 2:
+            if "anunciado" in s:
+                return reanunciar({p.get("sala"): s}, por_tiempo=False)
+            return pares(s)
+    return []
 
 
 def lista_usuarios():
@@ -205,8 +266,12 @@ def entrar_sala(cmd, cuerpo, conexion, c, p):
     # al anfitrión (y los demás de la sala): 0x1057 (`0x54F020`, 0x377 B) = u8 → +0x272 ·
     #   u8 → +0x271 (estado de la sala) · vt 0x89A3B8 · u8 → +0x2DE · u8 → +0x2DF · el
     #   miembro NUEVO completo (0x36F) — uno por destinatario (su dirección depende de quién la ve)
+    #   ★ (22-nov) +0x2DF = 2: en el exe (`0x54F0EA` → `0x54F0FC`: `call 0x621980(4)`), con +0x2DF = 2 el
+    #   anfitrión (y quienes ya estaban en la sala) también mandan su 0x3006 × 4 al punch del server y
+    #   renuevan su puerto UDP público cada vez que entra alguien (antes iba en 0 y el anfitrión no renovaba nunca)
     def aviso(para):
-        return (struct.pack("<BBIBB", 0, 0, 0x89A3B8, 0, 0)
+        listo_para = 1 if para in s.get("listos", ()) else 0
+        return (struct.pack("<BBIBB", 0, 0, 0x89A3B8, listo_para, 2)
                 + miembro(c, yo, completo=True, conexion=conexion, para=para))
     return ([(0x1020, cuerpo20, 0)] + [(0x1057, aviso(n), 0, n) for n in otros]
             + pares(s, 500) + avisar_lista(salvo=conexion))
@@ -241,6 +306,8 @@ def _sacar_de_sala(s, num, conexion):
     if conexion not in s["miembros"]:
         return []
     yo = numero(s, conexion)
+    era_master_stage = bool(s.get("jugando") and s.get("largada") and s.get("anfitrion") == conexion
+                            and not (PARTIDAS.get(conexion) or {}).get("resultado_guardado"))
     s["miembros"].remove(conexion)
     s.get("numeros", {}).pop(conexion, None)
     s.get("listos", set()).discard(conexion)
@@ -262,10 +329,12 @@ def _sacar_de_sala(s, num, conexion):
         s.get("listos", set()).discard(s["anfitrion"])  # (el anfitrión no «está listo»: larga)
     nuevo = numero(s, s["anfitrion"])
     r = [(0x1058, struct.pack("<BHB", yo, 3, nuevo), 0, n) for n in s["miembros"]]
-    # ★ (20-nov, multijugador) si se fue (o se le cortó el juego) mientras los demás esperaban en la
-    #   pantalla de carga, y los que quedan ya cargaron: la largada. Antes sólo se miraba al llegar un
-    #   0x105F, y como ya habían llegado todos, nadie la daba: los demás quedaban cargando para siempre.
-    from servidor.partida import largar_si_cargaron
+    # ★ (22-nov) si el máster se fue o se desconectó en plena stage (ya largada), la stage SIGUE con el nuevo
+    #   anfitrión (0x1058 tipo 3 prende +0x168 en su cliente) y desde ahí rige la guardia de stage trabada (90 s
+    #   sin bajas nuevas). Si se fue durante la pantalla de carga (antes de la largada), los que ya cargaron largan.
+    from servidor.partida import activar_guardia_traspaso, largar_si_cargaron
+    if era_master_stage and s.get("en_stage"):
+        activar_guardia_traspaso(s, conexion)
     return r + largar_si_cargaron(s)
 
 
@@ -329,9 +398,83 @@ def listo(cmd, cuerpo, conexion, c, p):
     return r
 
 
+def cuentas_gm():
+    """★ (22-nov) Las cuentas con permiso de GM (`config.GM_CUENTAS` / `EDA_GM_CUENTAS`, separadas por comas).
+    Vacía por defecto = nadie es GM."""
+    crudo = config.GM_CUENTAS
+    if isinstance(crudo, str):
+        return {x.strip() for x in crudo.split(",") if x.strip()}
+    return {str(x).strip() for x in (crudo or ()) if str(x).strip()}
+
+
+def es_gm(cuenta):
+    if not cuenta or cuenta.startswith("_"):
+        return False
+    gms = cuentas_gm()
+    if cuenta in gms:
+        return True
+    pref = config.PREFIJO_CUENTA or ""
+    return bool(pref and cuenta.startswith(pref) and cuenta[len(pref):] in gms)
+
+
+def log_gm(mensaje):
+    print(mensaje, flush=True)
+
+
+def _buscar_conectado(texto):
+    """(conexión, cuenta_dict) del jugador conectado con ese nick o nombre de cuenta, o (None, None)."""
+    t = (texto or "").strip().lower()
+    if not t:
+        return None, None
+    for n in sorted(ASIGNADAS):
+        nom = ASIGNADAS.get(n)
+        if not nom or nom.startswith("_"):
+            continue
+        cn = leer(n)
+        if nombre_visible(cn).lower() == t:
+            return n, cn
+    for n in sorted(ASIGNADAS):
+        nom = ASIGNADAS.get(n)
+        if nom and not nom.startswith("_") and nom.lower() == t:
+            return n, leer(n)
+    return None, None
+
+
+def _refresco_gm(destino, cuenta, cambio):
+    if not config.GM_EN_VIVO or destino not in ASIGNADAS:
+        return None
+    if destino in VIVO.__dict__.get("DESCONECTADAS", ()):
+        return None
+    estado = PARTIDAS.get(destino, {})
+    pantalla = estado.get("pantalla_gm")
+    if pantalla not in ("lobby", "sala") or estado.get("cargando"):
+        return None
+    sala = SALAS.get(estado.get("sala"))
+    if sala is not None and (sala.get("jugando") or sala.get("en_stage")):
+        return None
+    if pantalla == "sala" and (sala is None or destino not in sala["miembros"]):
+        return None
+    if pantalla == "lobby" and estado.get("sala") is not None:
+        return None
+    if cambio == "oro":
+        # 0x54A7A0 lee u16 resultado, u32 oro y u8 cantidad. Con cero salta
+        # todos los cambios de durabilidad, pero activa el aviso de reparación 0xDD.
+        return (0x103A, struct.pack("<HIB", 1, cuenta["plata"], 0), 0, destino)
+    activa = leer(destino)
+    if nombre_visible(activa).lower() != nombre_visible(cuenta).lower():
+        return None
+    from servidor.inventario import cola_inventario
+
+    # 0x54BBB0 copia stats y equipo del personaje activo. Mandamos su equipo
+    # guardado y ambas listas vacías. Pestaña 0 evita abrir una pestaña de
+    # inventario: 0x528CA0 sólo selecciona controles para valores 4 a 7.
+    # El despacho fuera del inventario requiere confirmación en el juego.
+    return (0x102C, struct.pack("<HB", 1, 0) + cola_inventario(activa), 0, destino)
+
+
 @maneja(0x100D)
 def chat(cmd, cuerpo, conexion, c, p):
-    """★ CHAT (lobby / sala) + COMANDOS GM (/oro, /nivel, /item, /ayuda)"""
+    """★ CHAT (lobby / sala) + COMANDOS GM (/oro, /nivel, /item, /ayuda: sólo cuentas en EDA_GM_CUENTAS)"""
     if not (len(cuerpo) >= 13):
         return None
     # C→S (medido 18:19): u8 tipo (1) · u32 destino (FFFFFFFF = todos) · u32 0 · u32 largo en
@@ -342,7 +485,7 @@ def chat(cmd, cuerpo, conexion, c, p):
     largo = struct.unpack_from("<I", cuerpo, 9)[0]
     texto = cuerpo[13:13 + largo]
 
-    # ★ Comandos de GM / Tester (aporte de Hysteria-xyz)
+    # ★ Comandos de chat y de GM
     try:
         texto_str = texto.decode("utf-16-le").rstrip("\x00").strip()
     except Exception:
@@ -354,35 +497,140 @@ def chat(cmd, cuerpo, conexion, c, p):
         if r is not None:
             return r
 
-        def _aviso(txt):
+        def _aviso(txt, dest=None):
             b = txt.encode("utf-16-le")
             nom = "[Sistema]".encode("utf-16-le")[:24].ljust(26, b"\0")
-            return [(0x1005, struct.pack("<HBII", 0, 4, 0xFF00FF00, 0) + nom
-                             + struct.pack("<I", len(b)) + b, 0)]
+            paq = (0x1005, struct.pack("<HBII", 0, 4, 0xFF00FF00, 0) + nom
+                           + struct.pack("<I", len(b)) + b, 0)
+            return [paq if dest is None else paq + (dest,)]
+
+        def _avisar_cambio(mensaje, destino, cuenta, cambio, sin_recordatorio=False):
+            refresco = _refresco_gm(destino, cuenta, cambio)
+            texto = mensaje
+            if refresco:
+                texto += " · actualizado en vivo (experimental)"
+            elif not sin_recordatorio:
+                texto += " · se ve al volver a la pantalla de personajes"
+            avisos = _aviso(texto)
+            if destino is not None and destino != conexion:
+                avisos += _aviso(texto, dest=destino)
+            return [refresco] + avisos if refresco else avisos
+
+        def _auditar(accion, dest_c, detalle):
+            log_gm("gm: #%s (%s) · %s · a %s (%s) · %s"
+                   % (conexion, c["nombre"], accion, dest_c["nombre"], nombre_visible(dest_c), detalle))
 
         partes = texto_str[1:].split()
         sub = partes[0].lower() if partes else ""
-        if sub in ("oro", "gold"):
-            if len(partes) >= 2 and partes[1].isdigit():
-                c["plata"] = max(0, min(int(partes[1]), 2_000_000_000))
-                guardar(c)
-                return _aviso(f"Oro actualizado a {c['plata']}")
-            return _aviso("Uso: /oro <cantidad>")
-        elif sub == "cash":                                  # ★ (Paso 6) EDA usa sólo oro
+        gm = es_gm(c["nombre"])
+        if sub in ("ayuda", "help"):
+            if gm:
+                return _aviso(f"Eres GM. Comandos GM: /oro <n> [pj] fija, /oro +<n> [pj] suma, /oro -<n> [pj] resta, "
+                              f"/monedas <n>, /nivel <1-{len(EXPS)}>, "
+                              f"/item <id> [cant] [pj], /stats [pj] <5 valores>, /reiniciar <pj> (/reset), "
+                              f"/fin, /desbloquear [pj], /limpiar · Messenger: /messenger")
+            return _aviso("Comandos: /messenger, /amigos, /amigo <nick>, /quitar <nick>, /m <nick> <mensaje>")
+        if not gm:
+            return _aviso(f"Comando desconocido: /{sub}. Usa /ayuda")
+        if sub == "cash":                                    # ★ (Paso 6) EDA usa sólo oro
             return _aviso("El cash no existe en EDA: todo se compra con oro (/oro <cantidad>).")
+
+        if sub == "fin":
+            if len(partes) != 1:
+                return _aviso("Uso: /fin")
+            sala = SALAS.get(p.get("sala"), {})
+            en_stage = sala.get("en_stage", set())
+            if not sala.get("jugando") or conexion not in en_stage or p.get("resultado_guardado"):
+                return _aviso("Debes estar en una stage para usar /fin.")
+            if not en_stage.issubset(sala.get("cargados", ())) or any(
+                    PARTIDAS.get(n, {}).get("cargando") for n in en_stage):
+                return _aviso("Espera a que todo el grupo termine de cargar la stage.")
+            from servidor.partida import fin_de_stage
+
+            # Como fin_rapido: la misma liquidación que 0x1064. Si el GM
+            # es invitado, usar al máster para aplicar el cierre al grupo.
+            master = sala["anfitrion"]
+            cuenta_master = c if master == conexion else leer(master)
+            r = fin_de_stage(0x1064, b"", master, cuenta_master, partida(master))
+            _auditar(texto_str, c, f"stage {p['escenario']} completada para el grupo")
+            return [x if len(x) > 3 else x + (master,) for x in r]
+        if sub == "desbloquear":
+            if len(partes) > 2:
+                return _aviso("Uso: /desbloquear [personaje]")
+            terminadas = sorted(ESCENARIOS)
+            if len(partes) == 2:
+                destino, cuenta = fijar_dato_personaje(partes[1], "terminadas", terminadas)
+                if cuenta is None:
+                    return _aviso(f"El personaje {partes[1]} no existe.")
+            else:
+                if not c.get("pjs"):
+                    return _aviso("Selecciona un personaje para usar /desbloquear.")
+                c["terminadas"] = terminadas
+                guardar(c)
+                destino, cuenta = conexion, c
+            _auditar(texto_str, cuenta, f"{len(terminadas)} stages marcadas como terminadas")
+            # 0x1018 carga las terminadas al volver a entrar al lobby (0x621620).
+            aviso = (f"{nombre_visible(cuenta)}: {len(terminadas)} stages desbloqueadas"
+                     " · se ve al volver a la pantalla de personajes")
+            avisos = _aviso(aviso)
+            if destino is not None and destino != conexion:
+                avisos += _aviso(aviso, dest=destino)
+            return avisos
+
+        if sub in ("oro", "gold"):
+            if len(partes) >= 2:
+                crudo_n = partes[1]
+                es_delta = crudo_n.startswith(("+", "-"))
+                magnitud = crudo_n[1:] if es_delta else crudo_n
+                if magnitud.isdecimal():
+                    val = int(crudo_n)
+                    if len(partes) >= 3:
+                        dest_n, dest_c = _buscar_conectado(partes[2])
+                        if dest_c is None:
+                            return _aviso(f"El jugador {partes[2]} no está conectado.")
+                        if dest_n == conexion:
+                            dest_c = c
+                    else:
+                        dest_n, dest_c = conexion, c
+                    antes = dest_c.get("plata", 0)
+                    nuevo = antes + val if es_delta else val
+                    dest_c["plata"] = max(0, min(nuevo, 2_000_000_000))
+                    guardar(dest_c)
+                    _auditar(texto_str, dest_c, f"oro {antes} -> {dest_c['plata']}")
+                    quien = f" de {nombre_visible(dest_c)}" if dest_n != conexion else ""
+                    return _avisar_cambio(f"Oro{quien} actualizado a {dest_c['plata']}", dest_n, dest_c, "oro")
+            return _aviso("Uso: /oro <cantidad>, /oro +<cantidad> o /oro -<cantidad> [personaje]")
         elif sub in ("nivel", "lvl", "level"):
             if len(partes) >= 2 and partes[1].isdigit():
                 n = max(1, min(int(partes[1]), len(EXPS)))
+                antes = nivel(c["exp"])
                 c["exp"] = EXPS[n - 1]
                 guardar(c)
+                _auditar(texto_str, c, f"nivel {antes} -> {n} (EXP: {c['exp']})")
                 return _aviso(f"Nivel actualizado a {n} (EXP: {c['exp']})")
             return _aviso(f"Uso: /nivel <1-{len(EXPS)}>")
         elif sub == "item":
             if len(partes) >= 2 and partes[1].isdigit():
                 iid = int(partes[1])
-                cant = int(partes[2]) if len(partes) >= 3 and partes[2].isdigit() else 1
+                cant = 1
+                nom_dest = None
+                if len(partes) >= 3:
+                    if partes[2].isdigit():
+                        cant = max(1, min(int(partes[2]), 999))
+                        if len(partes) >= 4:
+                            nom_dest = partes[3]
+                    else:
+                        nom_dest = partes[2]
+                if nom_dest is not None:
+                    dest_n, dest_c = _buscar_conectado(nom_dest)
+                    if dest_c is None:
+                        return _aviso(f"El jugador {nom_dest} no está conectado.")
+                    if dest_n == conexion:
+                        dest_c = c
+                else:
+                    dest_n, dest_c = conexion, c
                 from servidor.objetos import inventario, libre_en_bolsa, serial_nuevo, es_equipo
-                inv = inventario(c)
+                inv = inventario(dest_c)
                 it = next((x for x in inv if x[0] == iid and x[2] >= 18 and not es_equipo(iid)), None)
                 if it:
                     it[1] = min(999, it[1] + cant)
@@ -392,34 +640,55 @@ def chat(cmd, cuerpo, conexion, c, p):
                         inv.append([iid, min(999, cant) if not es_equipo(iid) else 1, slot, serial_nuevo(inv), 1])
                     except StopIteration:
                         return _aviso("La bolsa está llena")
-                c["items"] = inv
-                guardar(c)
+                dest_c["items"] = inv
+                guardar(dest_c)
+                _auditar(texto_str, dest_c, f"item {iid} x{cant}")
+                if dest_n != conexion:
+                    return (_aviso(f"Item {iid} (x{cant}) agregado a {nombre_visible(dest_c)}")
+                            + _aviso(f"Item {iid} (x{cant}) agregado", dest=dest_n))
                 return _aviso(f"Item {iid} (x{cant}) agregado")
-            return _aviso("Uso: /item <id> [cantidad]")
+            return _aviso("Uso: /item <id> [cantidad] [personaje]")
         elif sub in ("moneda", "monedas"):
             if len(partes) >= 2 and partes[1].isdigit():
+                antes = c.get("monedas", 0)
                 c["monedas"] = max(0, min(int(partes[1]), 999))
                 guardar(c)
+                _auditar(texto_str, c, f"monedas {antes} -> {c['monedas']}")
                 return _aviso(f"Monedas actualizadas a {c['monedas']}")
             return _aviso("Uso: /monedas <cantidad>")
-        elif sub == "stats":
-            if len(partes) >= 2:
+        elif sub in ("stats", "reiniciar", "reset"):
+            if sub == "stats":
+                dirigido = len(partes) == 7
+                argumentos = partes[2:] if dirigido else partes[1:]
                 try:
-                    vals = [max(0, min(int(x), 9999)) for x in partes[1:6]]
-                    while len(vals) < 5:
-                        vals.append(0)
+                    if not 1 <= len(argumentos) <= 5:
+                        raise ValueError
+                    vals = [max(0, min(int(x), 9999)) for x in argumentos]
+                except ValueError:
+                    return _aviso("Uso: /stats [personaje] <str> <con> <dex> <int> <wis>")
+                vals += [0] * (5 - len(vals))
+                detalle = "Stats actualizados: STR %d CON %d DEX %d INT %d WIS %d" % tuple(vals)
+                if not dirigido:
                     c["stats"] = vals
                     guardar(c)
-                    return _aviso(f"Stats actualizados: STR {vals[0]} CON {vals[1]} DEX {vals[2]} INT {vals[3]} WIS {vals[4]}")
-                except ValueError:
-                    pass
-            return _aviso("Uso: /stats <str> <con> <dex> <int> <wis>")
+                    _auditar(texto_str, c, detalle)
+                    return _avisar_cambio(detalle, conexion, c, "stats", sin_recordatorio=True)
+            else:
+                if len(partes) != 2:
+                    return _aviso(f"Uso: /{sub} <personaje>")
+                vals = [0] * 5
+                detalle = "Puntos repartidos devueltos"
+            dest_n, dest_c = fijar_dato_personaje(partes[1], "stats", vals)
+            if dest_c is None:
+                return _aviso(f"El personaje {partes[1]} no existe.")
+            _auditar(texto_str, dest_c, detalle)
+            return _avisar_cambio(f"{nombre_visible(dest_c)}: {detalle}", dest_n, dest_c, "stats")
         elif sub in ("limpiar", "clear"):
+            antes = len(c.get("items", []))
             c["items"] = [x for x in c.get("items", []) if len(x) > 2 and x[2] < 18]
             guardar(c)
+            _auditar(texto_str, c, f"limpiar bolsa ({antes} -> {len(c['items'])} items)")
             return _aviso("Bolsa limpiada (equipo y atajos conservados)")
-        elif sub in ("ayuda", "help"):
-            return _aviso(f"Comandos GM: /oro <n>, /monedas <n>, /nivel <1-{len(EXPS)}>, /item <id> [cant], /stats <5 valores>, /limpiar · Messenger: /messenger")
         return _aviso(f"Comando desconocido: /{sub}. Usa /ayuda")
 
     # ⚠ medido con Frida (18:23): el TIPO lo lee en B+2 (con el tipo en B+0 leía 0xFF). La
@@ -669,10 +938,20 @@ def largar(cmd, cuerpo, conexion, c, p):
     #   `0x61C170`): si no, el mismo error, que el cliente muestra como «All users must be ready»
     if any(n != conexion and n not in s.get("listos", ()) for n in miembros):
         return [(0x1050, struct.pack("<H", 0x138A), 0)]
+    previos = []
+    if s and len(miembros) >= 2:
+        # ★ (22-nov) antes de cada partida (0x104F), asegurar que todos tengan la dirección ACTUAL de los demás
+        if "anunciado" in s:
+            previos = reanunciar({p.get("sala"): s}, por_tiempo=False)
+        elif any(relay.actual_de(n) or partida(n).get("sin_directo") for n in miembros):
+            previos = pares(s)
     if s:
         s["jugando"], s["cargados"] = True, set()
         s.pop("largada", None)                          # (20-nov: la largada se da UNA vez por stage)
         s.pop("carga_desde", None)
+        s.pop("traspaso_master", None)
+        s.pop("ultima_baja_stage", None)
+        s["bajas_stage"] = set()
         s["en_stage"] = set(miembros)                   # (Punto 3: «jugando» hasta que salgan TODOS)
         s["muertos_stage"] = 0                          # (21-nov: las bajas de la partida, del máster)
         s["listos"] = set()                             # (al volver de la stage, todos «no listo»: `0x548AF0`)
@@ -689,7 +968,7 @@ def largar(cmd, cuerpo, conexion, c, p):
         cn = leer(n)
         r.append((0x104F, struct.pack("<HIBB", 1, cn["partidas"], 0, len(miembros)) + lista,
                   0, n))
-    return r + (avisar_lista(salvo=conexion) if s else [])
+    return previos + r + (avisar_lista(salvo=conexion) if s else [])
 
 
 @maneja(0x1050)

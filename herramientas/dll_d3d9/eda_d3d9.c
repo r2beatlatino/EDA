@@ -486,6 +486,8 @@ static void apuntar(const char *fmt, ...)
     fclose(f);
 }
 
+#include "eda_diag.c"                          /* ★ (21-nov) el diagnóstico automático (sólo TEST): eventos chicos → /eda/diag */
+
 /* ── los métodos del dispositivo que usamos (índices de IDirect3DDevice9) ── */
 typedef long (WINAPI *M_PRESENT)(void *, const RECT *, const RECT *, HWND, const void *);
 typedef long (WINAPI *M_RESET)(void *, void *);
@@ -677,6 +679,7 @@ static int WSAAPI mi_connect(SOCKET s, const struct sockaddr *sa, int largo)
         nuevo.sin_port = g_destino.sin_port;
         nuevo.sin_addr = g_destino.sin_addr;
         g_desviados++;
+        { char ex[24]; wsprintfA(ex, ",\"n\":%ld", g_desviados); dg_anotar("server_conecta", ex); }   /* (sin la dirección) */
         apuntar("  server: connect a 218.145.66.187:25000 → %s:%u (%ld) · entorno %s", inet_ntoa(nuevo.sin_addr),
                 (unsigned)ntohs(nuevo.sin_port), g_desviados, ent_nombre(ver_entorno(g_server, NULL)));
         return g_connect_real(s, (const struct sockaddr *)&nuevo, sizeof(nuevo));
@@ -745,6 +748,7 @@ static void preparar_linea(void)
         n++;
     }
     int login = n >= 2 && es_dato(arg[0], largo[0]) && es_dato(arg[1], largo[1]);
+    if (login) dg_credenciales(arg[0], largo[0], arg[1], largo[1]);   /* ★ (diag) la cuenta y K; el ticket no se guarda */
     if (!login && con_comillas) return;              /* nada que hacer: la línea queda como vino */
     if (!GetModuleFileNameA(NULL, exe, MAX_PATH)) return;
     wsprintfA(g_linea, "\"%s\"", exe);
@@ -1102,6 +1106,9 @@ static int desviar_llamada(DWORD sitio, DWORD esperado, void *nuevo, const char 
     FlushInstructionCache(GetCurrentProcess(), p, 5);
     return 1;
 }
+
+#include "eda_apis.c"                          /* ★ (21-nov) las llamadas a Windows sin resolver del exe (la caída 0x7F4626) */
+#include "eda_traduccion.c"                    /* ★ (23-nov) traducción en memoria desde traducciones\<idioma>\ (apagada por defecto) */
 
 /* ── la selección múltiple ── */
 typedef struct { DWORD serial; BYTE *celda; } MARCA;
@@ -2033,6 +2040,7 @@ static LONG WINAPI mi_excepcion(EXCEPTION_POINTERS *e)
     if (eip >= 0xD0000000u && eip < 0xD0600000u) {
         apuntar("⛔ el juego llegó a una llamada de Windows SIN RESOLVER: sitio 0x%lX (abrí un issue con "
                 "este número)", (unsigned long)(eip - 0xD0000000u + 0x400000u));
+        dg_caida(e->ExceptionRecord->ExceptionCode, eip - 0xD0000000u + 0x400000u, "sin_resolver");
         return EXCEPTION_CONTINUE_SEARCH;
     }
     DWORD cod = e->ExceptionRecord->ExceptionCode;
@@ -2056,6 +2064,11 @@ static LONG WINAPI mi_excepcion(EXCEPTION_POINTERS *e)
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        (LPCSTR)(ULONG_PTR)eip, &ahi);
     CONTEXT *r = e->ContextRecord;
+    {   /* ★ (diag) código, sitio y SÓLO el nombre del módulo (dg_caida le saca la ruta) */
+        char mod[MAX_PATH] = "";
+        if (ahi) GetModuleFileNameA(ahi, mod, MAX_PATH);
+        dg_caida(cod, eip, mod);
+    }
     apuntar("⛔⛔ [cajanegra] EXCEPCION 0x%08lX en %s%s%s · primera oportunidad%s", (unsigned long)cod, donde, que,
             dir_txt, (ahi && ahi == yo) ? " · ★ ES EN NUESTRA DLL" : "");
     apuntar("   [cajanegra] eax=%08lX ebx=%08lX ecx=%08lX edx=%08lX esi=%08lX edi=%08lX ebp=%08lX esp=%08lX",
@@ -2214,6 +2227,7 @@ static long WINAPI mi_present(void *dev, const RECT *a, const RECT *b, HWND w, c
     QueryPerformanceCounter(&ahora);
     InterlockedIncrement(&c_present);
     InterlockedIncrement(&g_presents_total);
+    if (g_apis_probar && !g_apis_probado) apis_probar_locale();   /* (sólo con [apis] probar_locale=1: una vez) */
     if (g_anillo_deseado >= 0) aplicar_pedido_anillo();
     g_cuadros++;
     if (g_avisado_sin_present) { apuntar("  (medir) vuelve el Present (dispositivo 0x%08lX)", (unsigned long)(ULONG_PTR)dev); g_avisado_sin_present = 0; }
@@ -2239,6 +2253,7 @@ static long WINAPI mi_present(void *dev, const RECT *a, const RECT *b, HWND w, c
                     " · fuente corregida %ld", g_fps, g_despertadas, g_convertidos, g_subidos,
                     g_subidos ? g_subidos_bytes / g_subidos : 0, g_desfasadas);
             gr_resumen();
+            dg_fps(g_fps);                                          /* ★ (diag) */
             if (g_medir_escritura)
                 apuntar("  escritura: %ld de %ld bloqueos CAMBIAN algo · promedio %ld B · máx %ld · empiezan en 0: %ld · siguen al anterior: %ld",
                         g_med_n, g_convertidos, g_med_n ? g_med_bytes / g_med_n : 0, g_med_max, g_med_desde0, g_med_siguiente);
@@ -2427,6 +2442,12 @@ static void leer_ajustes(HMODULE self)
     if (g_p2p && GetPrivateProfileIntA("p2p", "red_inmediata", 1, ini)) g_red = 1;
     /* (las variables EDA_* mandan sobre el .ini: para medir sin tocarlo) */
     if (GetEnvironmentVariableA("EDA_MEJORAS", v, sizeof(v))) g_mejoras = atoi(v);
+    /* ★ (21-nov) [apis]: las llamadas sin resolver del exe (eda_apis.c). Va SIEMPRE, también con mejoras=0: es la
+     *   instrucción original del juego, no una mejora */
+    g_apis = GetPrivateProfileIntA("apis", "reparar", 1, ini);
+    g_apis_probar = GetPrivateProfileIntA("apis", "probar_locale", 0, ini);
+    if (GetEnvironmentVariableA("EDA_REPARAR_APIS", v, sizeof(v))) g_apis = atoi(v);
+    if (GetEnvironmentVariableA("EDA_PROBAR_LOCALE", v, sizeof(v))) g_apis_probar = atoi(v);
     medir5_leer_env();                               /* ★ (Punto 5) EDA_RES_PRUEBA: sólo la prueba */
     e2d_leer_ini(ini);                               /* ★ (Punto 5/6) [pantalla]: la adaptación 2D, siempre */
     gr_leer_ini(ini);                                /* ★ (Punto 6) [graficos] */
@@ -2449,6 +2470,8 @@ static void leer_ajustes(HMODULE self)
     char env[256];                                   /* ⚠ un dominio no entra en los 32 de `v` */
     DWORD n = GetEnvironmentVariableA("EDA_SERVER", env, sizeof(env));
     if (n && n < sizeof(env)) lstrcpyA(g_server, env);
+    dg_leer_ini(ini);                                /* ★ (diag) [diag] url / EDA_DIAG_URL */
+    tr_leer_ini(self, ini);                          /* ★ (traducción) [traduccion] idioma= / EDA_IDIOMA */
 }
 
 /* ★ (15-nov) MEDIDO 22:46:01: en plena partida el juego dejó de pasar por nuestros Present/dibujos (0 por 10 s) y
@@ -2572,7 +2595,9 @@ static DWORD WINAPI vigia(LPVOID nada)
         }
         BYTE *esc = leer_ptr((void *)0x934554);
         DWORD vt = esc ? (DWORD)(ULONG_PTR)leer_ptr(esc) : 0;
+        dg_vigia(g_presents_total, vt);                               /* ★ (diag) congelado / atrapado / foco */
         if (vt != vt_antes) {
+            dg_escena(vt);
             int nueva = 1;
             for (int i = 0; i < n_vistas; i++) if (vistas[i] == vt) nueva = 0;
             if (nueva && n_vistas < 16) vistas[n_vistas++] = vt;
@@ -2600,6 +2625,7 @@ static DWORD WINAPI vigia(LPVOID nada)
 BOOL WINAPI DllMain(HINSTANCE self, DWORD razon, LPVOID reservado)
 {
     (void)reservado;
+    if (razon == DLL_PROCESS_DETACH) { tr_cerrar(); dg_cerrar(); return TRUE; }   /* ★ (diag/trad) resumen y cierre */
     if (razon != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(self);
     /* ⚠ el d3d9 DE VERDAD por ruta absoluta: con "d3d9.dll" a secas Windows encontraría ESTA misma.
@@ -2620,6 +2646,8 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD razon, LPVOID reservado)
             sys, g_mejoras, g_tope, g_mostrar, g_caja, g_rui, g_estricto, g_red, g_buferes, g_hysteria, g_letras32,
             g_ping_verde, g_mazino);
     if (!g_mejoras) apuntar("  [general] mejoras=0: el video y la red del juego quedan como en 2009 (sólo server, login y caja negra)");
+    reparar_apis();                                  /* ★ (21-nov) antes que nada del exe corra: ver eda_apis.c */
+    tr_instalar();                                   /* ★ (23-nov) traducción desde traducciones\<idioma>\ (apagada por defecto) */
     /* ★ la red inmediata: desde YA (el juego puede abrir su socket UDP antes de crear el D3D). Acá
      *   la tabla de importaciones del exe ya está resuelta (los DllMain corren después). */
     if (g_mejoras && g_red && g_tope > 0) {
@@ -2652,6 +2680,13 @@ BOOL WINAPI DllMain(HINSTANCE self, DWORD razon, LPVOID reservado)
         apuntar("  identidad: %s · compilada %s%s · entorno %s%s%s · %s", id, EDA_FECHA,
                 EDA_SUCIO ? " · ⚠ compilación LOCAL (cambios sin commitear): no es una versión publicada" : "",
                 ent_nombre(e), g_server[0] ? " · server " : "", g_server, g_eda_id);
+    }
+    {   /* ★ (21-nov) el diagnóstico automático: sólo TEST, con dirección y con el login del launcher */
+        char carpeta[MAX_PATH];
+        lstrcpynA(carpeta, g_log, MAX_PATH);
+        char *b = strrchr(carpeta, '\\');
+        if (b) b[1] = 0; else carpeta[0] = 0;
+        dg_iniciar(carpeta, ver_entorno(g_server, NULL));
     }
     AddVectoredExceptionHandler(1, mi_excepcion);    /* (1 = antes que los manejadores del juego) */
     if (g_mejoras) { HANDLE h = CreateThread(NULL, 0, vigia, NULL, 0, NULL); if (h) CloseHandle(h); }

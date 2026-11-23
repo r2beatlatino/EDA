@@ -18,6 +18,7 @@ from servidor.cuentas import EXPS, INICIO, cuenta_de, guardar, leer, nivel
 from servidor.datos import ESCENARIOS, NADA, PRECIOS, precios_venta, productos, puntos_de, tabla_habilidades, tabla_premios, tipos_item
 from servidor.objetos import PUNTOS_POR_NIVEL, casilleros_de, equipo, es_equipo, ficha, inventario, libre_en_bolsa, nivel_engarce, obj_habilidad, pj_cuenta, serial_nuevo, stats_de
 from servidor.relay import dir_udp, escribir_relay, identidad_de, identidad_falsa, relay
+from servidor.relay import actual_de as relay_actual_de
 from servidor.salas import miembro, pares
 from servidor.partida import cuerpo_1072, dar_premio
 from servidor.juego import cerrada, responder
@@ -649,73 +650,88 @@ def control():
         t = texto.encode("utf-16-le")
         return struct.pack("<BII", 1, 0xFFFFFFFF, 0) + struct.pack("<I", len(t)) + t
 
-    # /oro
-    r = responder(0x100D, _chat_payload("/oro 77777"), 203)
-    d = leer(203)
-    chequear("/oro 77777 actualiza la plata del jugador a 77777",
-             d["plata"] == 77777 and r[0][0] == 0x1005 and "77777".encode("utf-16-le") in r[0][1])
-    # ★ el revés: /oro sin número devuelve aviso de uso y no cambia el oro
-    r = responder(0x100D, _chat_payload("/oro abc"), 203)
-    chequear("★ el revés: /oro inválido devuelve aviso y mantiene el oro",
-             leer(203)["plata"] == 77777 and "Uso: /oro".encode("utf-16-le") in r[0][1])
+    gm_antes = config.GM_CUENTAS
+    config.GM_CUENTAS = cuenta_de(203)
+    try:
+        # /oro
+        r = responder(0x100D, _chat_payload("/oro 77777"), 203)
+        d = leer(203)
+        chequear("/oro 77777 actualiza la plata del jugador a 77777",
+                 d["plata"] == 77777 and r[0][0] == 0x1005 and "77777".encode("utf-16-le") in r[0][1])
+        # ★ el revés: /oro sin número devuelve aviso de uso y no cambia el oro
+        r = responder(0x100D, _chat_payload("/oro abc"), 203)
+        chequear("★ el revés: /oro inválido devuelve aviso y mantiene el oro",
+                 leer(203)["plata"] == 77777 and "Uso: /oro".encode("utf-16-le") in r[0][1])
 
-    # /cash: deshabilitado (Paso 6: EDA usa sólo oro); el cash guardado NO se toca
-    d = leer(203)
-    d["cash"] = 1234                                         # (una cuenta vieja con cash)
-    guardar(d)
-    r = responder(0x100D, _chat_payload("/cash 9999"), 203)
-    chequear("(Paso 6) /cash está deshabilitado: avisa y NO cambia el cash guardado (1234)",
-             leer(203)["cash"] == 1234 and "no existe".encode("utf-16-le") in r[0][1])
-    r = responder(0x1011, b"\1\0\0\0", 203)
-    chequear("(Paso 6) 0x1012: cash = 0 al cliente (+0x0F) aunque la cuenta guarde 1234; el oro en +0x13",
-             struct.unpack_from("<I", r[0][1], 0x0F)[0] == 0
-             and struct.unpack_from("<I", r[0][1], 0x13)[0] == leer(203)["plata"] and leer(203)["cash"] == 1234)
+        # /cash: deshabilitado (Paso 6: EDA usa sólo oro); el cash guardado NO se toca
+        d = leer(203)
+        d["cash"] = 1234                                         # (una cuenta vieja con cash)
+        guardar(d)
+        r = responder(0x100D, _chat_payload("/cash 9999"), 203)
+        chequear("(Paso 6) /cash está deshabilitado: avisa y NO cambia el cash guardado (1234)",
+                 leer(203)["cash"] == 1234 and "no existe".encode("utf-16-le") in r[0][1])
+        r = responder(0x1011, b"\1\0\0\0", 203)
+        chequear("(Paso 6) 0x1012: cash = 0 al cliente (+0x0F) aunque la cuenta guarde 1234; el oro en +0x13",
+                 struct.unpack_from("<I", r[0][1], 0x0F)[0] == 0
+                 and struct.unpack_from("<I", r[0][1], 0x13)[0] == leer(203)["plata"] and leer(203)["cash"] == 1234)
 
-    # /nivel
-    r = responder(0x100D, _chat_payload("/nivel 15"), 203)
-    d = leer(203)
-    chequear("/nivel 15 ajusta la EXP correspondiente a nivel 15",
-             nivel(d["exp"]) == 15 and "15".encode("utf-16-le") in r[0][1])
+        # /nivel
+        r = responder(0x100D, _chat_payload("/nivel 15"), 203)
+        d = leer(203)
+        chequear("/nivel 15 ajusta la EXP correspondiente a nivel 15",
+                 nivel(d["exp"]) == 15 and "15".encode("utf-16-le") in r[0][1])
 
-    # /item
-    r = responder(0x100D, _chat_payload("/item 21001 10"), 203)
-    d = leer(203)
-    it = next((x for x in d["items"] if x[0] == 21001), None)
-    chequear("/item 21001 10 agrega el ítem al inventario",
-             it is not None and it[1] >= 10 and "21001".encode("utf-16-le") in r[0][1])
+        # /item
+        r = responder(0x100D, _chat_payload("/item 21001 10"), 203)
+        d = leer(203)
+        it = next((x for x in d["items"] if x[0] == 21001), None)
+        chequear("/item 21001 10 agrega el ítem al inventario",
+                 it is not None and it[1] >= 10 and "21001".encode("utf-16-le") in r[0][1])
 
-    # /monedas
-    r = responder(0x100D, _chat_payload("/monedas 25"), 203)
-    chequear("/monedas 25 actualiza las monedas de resurrección a 25",
-             leer(203)["monedas"] == 25 and "25".encode("utf-16-le") in r[0][1])
-    r = responder(0x100D, _chat_payload("/monedas abc"), 203)
-    chequear("★ el revés: /monedas inválido devuelve aviso y mantiene monedas",
-             leer(203)["monedas"] == 25 and "Uso: /monedas".encode("utf-16-le") in r[0][1])
+        # /monedas
+        r = responder(0x100D, _chat_payload("/monedas 25"), 203)
+        chequear("/monedas 25 actualiza las monedas de resurrección a 25",
+                 leer(203)["monedas"] == 25 and "25".encode("utf-16-le") in r[0][1])
+        r = responder(0x100D, _chat_payload("/monedas abc"), 203)
+        chequear("★ el revés: /monedas inválido devuelve aviso y mantiene monedas",
+                 leer(203)["monedas"] == 25 and "Uso: /monedas".encode("utf-16-le") in r[0][1])
 
-    # /stats
-    r = responder(0x100D, _chat_payload("/stats 12 14 16 18 20"), 203)
-    chequear("/stats actualiza atributos de combate del personaje",
-             leer(203)["stats"] == [12, 14, 16, 18, 20] and "STR 12".encode("utf-16-le") in r[0][1])
-    r = responder(0x100D, _chat_payload("/stats"), 203)
-    chequear("★ el revés: /stats sin argumentos devuelve aviso de uso",
-             "Uso: /stats".encode("utf-16-le") in r[0][1])
+        # /stats
+        r = responder(0x100D, _chat_payload("/stats 12 14 16 18 20"), 203)
+        chequear("/stats actualiza atributos de combate del personaje",
+                 leer(203)["stats"] == [12, 14, 16, 18, 20] and "STR 12".encode("utf-16-le") in r[0][1])
+        r = responder(0x100D, _chat_payload("/stats"), 203)
+        chequear("★ el revés: /stats sin argumentos devuelve aviso de uso",
+                 "Uso: /stats".encode("utf-16-le") in r[0][1])
 
-    # /limpiar
-    items_antes = [list(x) for x in leer(203)["items"]]
-    r = responder(0x100D, _chat_payload("/limpiar"), 203)
-    chequear("/limpiar limpia la bolsa conservando el equipo puesto",
-             all(x[2] < 12 for x in leer(203)["items"]) and "limpiada".encode("utf-16-le") in r[0][1])
-    d = leer(203)
-    d["items"] = items_antes
-    guardar(d)
+        # /limpiar
+        items_antes = [list(x) for x in leer(203)["items"]]
+        r = responder(0x100D, _chat_payload("/limpiar"), 203)
+        chequear("/limpiar limpia la bolsa conservando el equipo puesto",
+                 all(x[2] < 12 for x in leer(203)["items"]) and "limpiada".encode("utf-16-le") in r[0][1])
+        d = leer(203)
+        d["items"] = items_antes
+        guardar(d)
 
-    # /ayuda y desconocido
-    r = responder(0x100D, _chat_payload("/ayuda"), 203)
-    chequear("/ayuda responde con la lista de comandos disponibles",
-             "Comandos GM:".encode("utf-16-le") in r[0][1])
-    r = responder(0x100D, _chat_payload("/noexiste"), 203)
-    chequear("★ el revés: comando desconocido avisa sin romper",
-             "Comando desconocido".encode("utf-16-le") in r[0][1])
+        # /ayuda y desconocido
+        r = responder(0x100D, _chat_payload("/ayuda"), 203)
+        chequear("/ayuda responde con la lista de comandos disponibles (para GM incluye Comandos GM)",
+                 r[0][1][41:].startswith("Eres GM".encode("utf-16-le")))
+        r = responder(0x100D, _chat_payload("/noexiste"), 203)
+        chequear("★ el revés: comando desconocido avisa sin romper",
+                 "Comando desconocido".encode("utf-16-le") in r[0][1])
+
+        # ★ el revés: una cuenta que NO es GM no cambia su oro ni ve comandos de GM
+        config.GM_CUENTAS = ""
+        r_nogm = responder(0x100D, _chat_payload("/oro 12345"), 203)
+        chequear("★ el revés: sin ser GM, /oro no cambia el oro y responde Comando desconocido",
+                 leer(203)["plata"] == 77777 and "Comando desconocido".encode("utf-16-le") in r_nogm[0][1])
+        r_ayuda_nogm = responder(0x100D, _chat_payload("/ayuda"), 203)
+        chequear("★ el revés: sin ser GM, /ayuda no muestra Comandos GM pero sí /messenger",
+                 "GM".encode("utf-16-le") not in r_ayuda_nogm[0][1]
+                 and "/messenger".encode("utf-16-le") in r_ayuda_nogm[0][1])
+    finally:
+        config.GM_CUENTAS = gm_antes
 
     # ★ el revés: chat normal se difunde a los demás y no ejecuta comandos
     r = responder(0x100D, _chat_payload("Hola mundo"), 203)
@@ -732,18 +748,18 @@ def control():
     chequear("★ el revés: 0x105B sin sala → None", responder(0x105B, b"", 999) is None)
     del SALAS[55]
 
-    # ★ 0x1062: sincronización de vida/maná en cooperativo
+    # ★ 0x1063: reporte de golpes recibidos (sin responder 0x1062: en el exe 0x547440 desreferencia el slot en buf+4)
     SALAS[55] = {"sala": bytearray(0x59), "anfitrion": 301, "miembros": [301, 302]}
     partida(301)["sala"] = 55
     partida(302)["sala"] = 55
+    partida(301)["golpes"] = 0
     r = responder(0x1063, b"\x00\x64\x00", 301)
-    chequear("0x1063 (daño recibido) difunde 0x1062 (16 B) a los compañeros de equipo",
-             len(r) == 1 and r[0][0] == 0x1062 and len(r[0][1]) == 16 and r[0][3] == 302
-             and struct.unpack_from("<H", r[0][1], 8)[0] == 100)
+    chequear("0x1063 (daño recibido) suma golpes y NO emite 0x1062 (evita caída 0x547440 tras traspaso de jefe)",
+             r == [] and partida(301)["golpes"] == 1)
     partida(301).pop("sala", None)
     partida(302).pop("sala", None)
     del SALAS[55]
-    chequear("★ el revés: 0x1063 con un solo jugador no emite 0x1062",
+    chequear("★ el revés: 0x1063 con un solo jugador tampoco emite 0x1062",
              len(responder(0x1063, b"\x00\x64\x00", 203)) == 0)
 
     # ★ 0x1019 / 0x101A: entrar a sala desde la lista del lobby
@@ -1012,6 +1028,7 @@ def control():
     PARTIDAS.clear()
     ASIGNADAS.clear()
     SALAS.clear()
+    pruebas_diag_recepcion(chequear)
     pruebas_messenger(chequear)
     pruebas_messenger_cuentas_reales(chequear)
     PARTIDAS.clear()
@@ -1019,6 +1036,11 @@ def control():
     pruebas_login(chequear)
     PARTIDAS.clear()
     ASIGNADAS.clear()
+    SALAS.clear()
+    pruebas_sesion_unica_y_gm(chequear)
+    PARTIDAS.clear()
+    ASIGNADAS.clear()
+    SALAS.clear()
     pruebas_personajes(chequear)
     pruebas_cazadora(chequear)
     pruebas_150_variantes(chequear)
@@ -1348,9 +1370,9 @@ def pruebas_multijugador(chequear):
     #     el juego); antes 0x105D / 0x1060 / 0x1062 / 0x1066 / 0x106D iban a todos los de la sala
     sala_cargando(66, [A, B])
     cuerpos = {0x105D: b"\1" * 8, 0x1060: b"\0" * 4, 0x1062: bytes(16), 0x1066: bytes(6), 0x106D: bytes(16),
-               0x105C: b"\1" * 8, 0x1063: b"\0\x64\0"}
+               0x105C: b"\1" * 8}
     ambos = all(any(len(x) > 3 and x[3] == B for x in responder(k, v, A)) for k, v in cuerpos.items())
-    chequear("multi: con los dos en la stage, lo de A le llega a B (0x105C/D, 1060, 1062/3, 1066, 106D)", ambos)
+    chequear("multi: con los dos en la stage, lo de A le llega a B (0x105C/D, 1060, 1062, 1066, 106D)", ambos)
     SALAS[66]["en_stage"].discard(B)                     # (B terminó: está en las cartas / volvió a la sala)
     fuera = [hex(k) for k, v in cuerpos.items() if any(len(x) > 3 and x[3] == B for x in responder(k, v, A))]
     chequear("★ multi: B ya salió de la stage → no le llega NADA de la stage de A (antes: 0x105D/1060/1062/1066/106D)",
@@ -1585,25 +1607,36 @@ def pruebas_entre_casas(chequear):
     cerrada(970)
     entra(970, "02:CC:00:00:00:01", ("192.168.50.10", 57654), ("198.51.100.26", 18113), "198.51.100.26")
     partida(970)["desde"] = ahora
-    # ── modo «auto»: por pareja, el mismo camino en los dos sentidos
+    # ── modo «auto»: primero P2P directo (relay sólo de respaldo), por pareja y el mismo camino en los dos sentidos
     config.P2P = "auto"
     json.dump({"971": ["203.0.113.77", 40500, ahora + 1]}, open(config.PUNCH_MAPA, "w"))
     rel = ip_int("203.0.113.9")
-    chequear("auto: el anfitrión sin 0x3006 (no se sabe si su NAT guarda el puerto) → la pareja por el RELAY, "
-             "los dos sentidos", ruta(970, 971) == ruta(971, 970) == "relay"
-             and dir_udp(970, 971) == (rel, config.RELAY_BASE + 1 + 970)
-             and dir_udp(971, 970) == (rel, config.RELAY_BASE + 1 + 971))
+    chequear("auto: dos públicas vigentes (970 por 0x3002/0x100F sin 0x3006, 971 por 0x3006) → DIRECTO primero, "
+             "los dos sentidos",
+             ruta(970, 971) == ruta(971, 970) == "directo"
+             and dir_udp(970, 971) == host
+             and dir_udp(971, 970) == (ip_int("203.0.113.77"), 40500))
     json.dump({"970": ["198.51.100.26", 18113, ahora + 1], "971": ["203.0.113.77", 40500, ahora + 1]},
               open(config.PUNCH_MAPA, "w"))
-    chequear("auto: las dos públicas confiables (0x3006 y 0x3002 por el mismo puerto) → DIRECTO, los dos sentidos",
+    chequear("auto: las dos públicas vigentes por 0x3006 y 0x3002 → DIRECTO, los dos sentidos",
              estable(970) and estable(971) and ruta(970, 971) == ruta(971, 970) == "directo"
              and dir_udp(970, 971) == host and dir_udp(971, 970) == (ip_int("203.0.113.77"), 40500))
     json.dump({"970": ["198.51.100.26", 16429, ahora + 1], "971": ["203.0.113.77", 40500, ahora + 1]},
               open(config.PUNCH_MAPA, "w"))
-    chequear("★ el revés: el NAT del anfitrión le cambia el puerto (0x3006 por 16429, 0x3002 por 18113) → RELAY, "
-             "los dos sentidos (nunca uno directo y el otro no)",
-             not estable(970) and ruta(970, 971) == ruta(971, 970) == "relay"
-             and dir_udp(971, 970)[1] == config.RELAY_BASE + 1 + 971)
+    chequear("auto: si el NAT de 970 cambió al puerto 16429 en su 0x3006 más reciente → DIRECTO con el puerto nuevo "
+             "(actual_de: 16429)",
+             not estable(970) and ruta(970, 971) == ruta(971, 970) == "directo"
+             and dir_udp(970, 971) == (ip_int("198.51.100.26"), 16429)
+             and dir_udp(971, 970) == (ip_int("203.0.113.77"), 40500))
+    # sin pública vigente en uno de los dos → relay en los dos sentidos
+    pub_970_vieja = partida(970).pop("publica", None)
+    json.dump({"971": ["203.0.113.77", 40500, ahora + 1]}, open(config.PUNCH_MAPA, "w"))
+    chequear("★ el revés (auto): uno sin pública vigente → RELAY en los dos sentidos",
+             ruta(970, 971) == ruta(971, 970) == "relay"
+             and dir_udp(970, 971) == (rel, config.RELAY_BASE + 1 + 970)
+             and dir_udp(971, 970) == (rel, config.RELAY_BASE + 1 + 971))
+    partida(970)["publica"] = pub_970_vieja
+    partida(970)["publica_desde"] = ahora
     partida(971)["ip_tcp"] = "198.51.100.26"
     chequear("auto: misma casa (misma IP de conexión) → las PRIVADAS, los dos sentidos",
              ruta(970, 971) == ruta(971, 970) == "casa"
@@ -1631,6 +1664,136 @@ def pruebas_entre_casas(chequear):
     json.dump({"970": ["198.51.100.26", 18700, ahora + 3]}, open(config.PUNCH_MAPA, "w"))
     chequear("★ el revés: jugando, no (el 0x1059 es de la sala que espera)", reanunciar(SALAS) == [])
     SALAS.pop(77)
+
+    # ── ★ (22-nov) Caso A: a un jugador le cambia el puerto público a mitad de la sesión → la partida siguiente
+    #    les da a los demás el nuevo (y el 0x1057 lleva +0x2DF=2 para que el anfitrión mande 0x3006 al entrar alguien)
+    sala_b = bytearray(0x59)
+    struct.pack_into("<I", sala_b, 0x28, 1011)
+    sala_b[0x2F] = 3
+    responder(0x101D, bytes(4) + bytes(sala_b), 970)
+    num_s = partida(970)["sala"]
+    json.dump({"970": ["198.51.100.26", 2510, ahora + 1], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    r_ent = responder(0x101F, struct.pack("<IH", 0, num_s) + bytes(20), 971)
+    m_1057 = next(x[1] for x in r_ent if x[0] == 0x1057 and x[3] == 970)
+    m_1059 = next(x[1] for x in r_ent if x[0] == 0x1059 and x[3] == 971)
+    chequear("0x1057 al anfitrión lleva +0x2DF=2 (dispara su 0x3006 en el exe 0x54F0FC) y 0x1059 lleva +0x2DF=3",
+             m_1057[7] == 2 and m_1059[6] == 3 and struct.pack("<IH", ip_int("198.51.100.26"), 2510) in m_1059)
+    responder(0x1047, b"\x01\x01", 971)
+    r_l1 = responder(0x104E, b"", 970)
+    chequear("★ el revés: si el puerto no cambió antes de largar, 0x104E no repite el 0x1059",
+             not any(x[0] == 0x1059 for x in r_l1) and any(x[0] == 0x104F for x in r_l1))
+    responder(0x105F, b"\0" * 4, 970)
+    responder(0x105F, b"\0" * 4, 971)
+    responder(0x1064, b"\0", 970)
+    # a mitad de la sesión, al anfitrión (970) le cambia el puerto público de 2510 a 2330
+    json.dump({"970": ["198.51.100.26", 2330, ahora + 20], "971": ["203.0.113.77", 40500, ahora + 1]},
+              open(config.PUNCH_MAPA, "w"))
+    responder(0x1047, b"\x01\x01", 971)
+    r_l2 = responder(0x104E, b"", 970)
+    idx_59 = next((i for i, x in enumerate(r_l2) if x[0] == 0x1059 and x[3] == 971), -1)
+    idx_4f = next((i for i, x in enumerate(r_l2) if x[0] == 0x104F and x[3] == 971), -1)
+    chequear("★ Caso A: a 970 le cambia el puerto público a mitad de la sesión (2510 → 2330) → la partida siguiente "
+             "le da a 971 el puerto NUEVO (2330) antes del 0x104F",
+             0 <= idx_59 < idx_4f and struct.pack("<IH", ip_int("198.51.100.26"), 2330) in r_l2[idx_59][1])
+    responder(0x105F, b"\0" * 4, 970)
+    responder(0x105F, b"\0" * 4, 971)
+    responder(0x1064, b"\0", 970)
+
+    # ── ★ (22-nov) Caso B en «auto» con 3 jugadores: un 0x105A con -1000 pasa SOLO ese par al relay, los demás
+    #    siguen directos; el par marcado sin_directo se queda en el relay toda la sesión; sin pública vigente → relay
+    config.P2P = "auto"
+    entra(972, "02:CC:00:00:00:03", ("192.168.1.30", 57654), ("192.0.2.55", 51000), "192.0.2.55")
+    partida(972)["desde"] = ahora
+    json.dump({"970": ["198.51.100.26", 2330, ahora + 20], "971": ["203.0.113.77", 40500, ahora + 1],
+               "972": ["192.0.2.55", 51000, ahora + 2]}, open(config.PUNCH_MAPA, "w"))
+    responder(0x101F, struct.pack("<IH", 0, num_s) + bytes(20), 972)
+    chequear("★ auto con 3 jugadores y públicas vigentes: los 3 pares arrancan en DIRECTO",
+             ruta(970, 971) == ruta(971, 970) == "directo"
+             and ruta(970, 972) == ruta(972, 970) == "directo"
+             and ruta(971, 972) == ruta(972, 971) == "directo")
+    r_ok = responder(0x105A, struct.pack("<IfB", 971, 0.075, 0), 971)
+    chequear("★ el revés: un 0x105A con buen ping (timeouts=0) conserva el directo",
+             r_ok == [] and dir_udp(970, 971) == (ip_int("198.51.100.26"), 2330))
+    r_mal = responder(0x105A, struct.pack("<IfB", 971, -1000.0, 2), 971)
+    p59_970 = next((x[1] for x in r_mal if x[0] == 0x1059 and x[3] == 970), b"")
+    p59_971 = next((x[1] for x in r_mal if x[0] == 0x1059 and x[3] == 971), b"")
+    chequear("★ auto + 0x105A (-1000 ms): SOLO el par que falló (970–971) pasa al RELAY; los demás pares "
+             "(970–972 y 971–972) siguen DIRECTOS",
+             ruta(970, 971) == ruta(971, 970) == "relay"
+             and ruta(970, 972) == ruta(972, 970) == "directo"
+             and ruta(971, 972) == ruta(972, 971) == "directo"
+             and dir_udp(970, 971) == (rel, config.RELAY_BASE + 1 + 970)
+             and dir_udp(971, 970) == (rel, config.RELAY_BASE + 1 + 971)
+             and dir_udp(970, 972) == (ip_int("198.51.100.26"), 2330)
+             and dir_udp(972, 970) == (ip_int("192.0.2.55"), 51000)
+             and dir_udp(971, 972) == (ip_int("203.0.113.77"), 40500)
+             and dir_udp(972, 971) == (ip_int("192.0.2.55"), 51000)
+             and struct.pack("<IH", rel, config.RELAY_BASE + 1 + 971) in p59_970
+             and struct.pack("<IH", ip_int("192.0.2.55"), 51000) in p59_970
+             and struct.pack("<IH", rel, config.RELAY_BASE + 1 + 970) in p59_971
+             and struct.pack("<IH", ip_int("192.0.2.55"), 51000) in p59_971
+             and not any(x[0] == 0x1059 and x[3] == 972 for x in r_mal))
+    chequear("★ el par marcado sin_directo (970–971) se queda en el relay toda la sesión",
+             ruta(970, 971) == "relay" and ruta(970, 972) == "directo")
+    partida(970).pop("sin_directo", None)
+    partida(971).pop("sin_directo", None)
+    pares(SALAS[num_s])
+    # ★ (22-nov) un par directo que lleva 10 min en la misma sala (varias stages seguidas, sin nadie nuevo que
+    #   dispare otro 0x3006, > VENCE_PUBLICA = 300 s) SIGUE DIRECTO con su última pública de esta sesión
+    partida(970)["publica_desde"] = ahora - 600
+    json.dump({"970": ["198.51.100.26", 2510, ahora - 600], "971": ["203.0.113.77", 40500, ahora + 1],
+               "972": ["192.0.2.55", 51000, ahora + 2]},
+              open(config.PUNCH_MAPA, "w"))
+    chequear("★ auto: un par directo que lleva 10 min en la misma sala (> VENCE_PUBLICA) SIGUE DIRECTO",
+             ruta(970, 971) == ruta(971, 970) == "directo"
+             and ruta(970, 972) == ruta(972, 970) == "directo"
+             # (la última conocida de 970 en ESTA sesión: su 0x3002 o su punch, la más reciente; aunque venció, no va al relay)
+             and dir_udp(970, 971) == relay_actual_de(970) and relay_actual_de(970) is not None
+             and relay_actual_de(970, vence=True) is None
+             and dir_udp(971, 970) == (ip_int("203.0.113.77"), 40500))
+    # ★ re-medición periódica en sala que espera (> 60 s desde el último 0x1059):
+    #   · durante `jugando` (en la carga o en plena stage) NUNCA se reenvía el 0x1059;
+    #   · con `jugando` en False, pasados > 60 s se vuelve a mandar el 0x1059 (mismas direcciones, +0x2DF=3);
+    #   · si después del re-envío llega un 0x105A con -1000 → SOLO ese par pasa al relay y los demás siguen directos.
+    s_esp = SALAS[num_s]
+    pares(s_esp)                                      # (lo anunciado = lo de ahora: que el re-envío sea SOLO por tiempo)
+    s_esp["anunciado_en"] = time.time() - 65
+    s_esp["jugando"] = True
+    s_esp["largada"] = False
+    chequear("★ el revés: durante la carga (jugando=True, largada=False), aunque pasen > 60 s NO se reenvía 0x1059",
+             reanunciar({num_s: s_esp}) == [])
+    s_esp["largada"] = True
+    chequear("★ el revés: en plena stage (jugando=True, largada=True), aunque pasen > 60 s NO se reenvía 0x1059",
+             reanunciar({num_s: s_esp}) == [])
+    s_esp["jugando"] = False
+    s_esp.pop("largada", None)
+    r_remed = reanunciar({num_s: s_esp})
+    chequear("★ sala que espera (> 60 s desde el último 0x1059): reenvía 0x1059 (mismas direcciones, +0x2DF=3) a los 3 "
+             "para repetir la medición",
+             sorted(x[3] for x in r_remed if x[0] == 0x1059) == [970, 971, 972]
+             and all(x[1][6] == 3 for x in r_remed)
+             and reanunciar({num_s: s_esp}) == [])
+    r_mal_remed = responder(0x105A, struct.pack("<IfB", 971, -1000.0, 2), 971)
+    chequear("★ tras el re-envío de 0x1059, un 0x105A con -1000 de 971 pasa SOLO el par 970–971 al RELAY y 970–972 / "
+             "971–972 siguen DIRECTOS",
+             ruta(970, 971) == ruta(971, 970) == "relay"
+             and ruta(970, 972) == ruta(972, 970) == "directo"
+             and ruta(971, 972) == ruta(972, 971) == "directo"
+             and any(x[0] == 0x1059 and x[3] == 970 for x in r_mal_remed)
+             and any(x[0] == 0x1059 and x[3] == 971 for x in r_mal_remed)
+             and not any(x[0] == 0x1059 and x[3] == 972 for x in r_mal_remed))
+    partida(970).pop("sin_directo", None)
+    partida(971).pop("sin_directo", None)
+    cerrada(972)
+    ASIGNADAS[970], ASIGNADAS[971] = "gen_970", "gen_971"
+    escribir_relay()
+    mapa_vps = json.load(open(config.RELAY_MAPA))
+    chequear("★ relay.json en el VPS: guarda la pública vigente (971) o None si venció (970), nunca 127.0.0.1:57654",
+             mapa_vps["971"]["udp"] == [ip_int("203.0.113.77"), 40500] and mapa_vps["970"]["udp"] is None)
+    SALAS.pop(num_s, None)
+    ASIGNADAS.pop(970, None)
+    ASIGNADAS.pop(971, None)
     (config.P2P_ENTRE_CASAS, config.RELAY_IP, config.P2P, config.PUNCH_MAPA) = viejos
     # ── EDA_P2P como llega del docker-compose (vacía si el .env no la tiene)
     import subprocess
@@ -1788,25 +1951,166 @@ def pruebas_fin_stage_grupo(chequear):
     chequear("el muerto (esperando revivir) también recibe el fin", a_quien(r, 0x1073, ns[0]) == ns)
     chequear("…y su game over queda cancelado", not partida(ns[1]).get("game_over_en"))
 
-    # el máster se va en plena stage: el mando pasa a uno que SIGUE en la stage, y su 0x1064 cierra la de todos
+    # ★ (22-nov, Caso C) si el máster se va o se desconecta en plena stage, la stage SIGUE: 0x1058 tipo 3 a los que
+    #   quedan (sin 0x1073/0x106E en ese momento) y el siguiente en la stage pasa a ser el anfitrión. Si el nuevo
+    #   máster manda bajas y el 0x1064 (o todas las bajas para cerrar_por_bajas), cobran normal.
+    from servidor import partida as mod_partida
     ns = jugadores(4)
     s = armar(93, ns)
+    for m in ns:
+        partida(m)["escenario"] = 1011
+    oro_antes = {m: leer(m)["plata"] for m in ns[2:]}
+    exp_antes = {m: leer(m)["exp"] for m in ns[2:]}
+    responder(0x1061, struct.pack("<H", 1) + bytes(6), ns[0])
+    responder(0x1061, struct.pack("<H", 2) + bytes(6), ns[0])
     responder(0x1064, bytes([1]), ns[1])              # (ns[1] ya terminó la suya)
-    r = responder(0x1074, b"", ns[0])                 # (el máster abandona)
+    r = responder(0x1074, b"", ns[0])                 # (el máster abandona en plena stage)
     nuevo = [x[1][3] for x in r if x[0] == 0x1058 and x[1][1:3] == b"\x03\x00"]
-    chequear("★ el máster abandona: el nuevo máster es uno que SIGUE en la stage (no el que ya terminó)",
-             s["anfitrion"] == ns[2] and nuevo and set(nuevo) == {s["numeros"][ns[2]]}, (s["anfitrion"], nuevo))
-    r = responder(0x1064, bytes([2]), ns[2])
-    chequear("…y su 0x1064 cierra la stage de los que quedaban", a_quien(r, 0x1073, ns[2]) == [ns[2], ns[3]])
+    chequear("★ el máster sale en plena stage: 0x1058 tipo 3 a los demás, nuevo anfitrión en la stage y SIN 0x1073/106E",
+             s["anfitrion"] == ns[2] and nuevo and set(nuevo) == {s["numeros"][ns[2]]}
+             and a_quien(r, 0x1073, ns[0]) == [] and a_quien(r, 0x106E, ns[0]) == [] and s.get("jugando"),
+             (s["anfitrion"], nuevo, a_quien(r, 0x1073, ns[0])))
+    responder(0x1061, struct.pack("<H", 3) + bytes(6), ns[2])
+    responder(0x1061, struct.pack("<H", 4) + bytes(6), ns[2])
+    # ★ (22-nov, caída P-20261122-235248-s1 a las 23:55:24): tras salir el anfitrión original ns[0] (slot 0), su
+    #   miembro fue borrado de cuenta+0x240 por el 0x1058 tipo 3 (0x61CA30). Cuando al compañero ns[3] le pegan y
+    #   manda 0x1063, el server suma sus golpes y NO manda 0x1062 al nuevo máster ns[2] (que antes llevaba buf+4=0
+    #   y tiraba el cliente en 0x5475A5 / 0x6360F0 al buscar al miembro 0 ya borrado).
+    r_golpe = responder(0x1063, b"\x03\x0a\x00", ns[3])
+    chequear("★ tras traspaso de jefe (P-20261122-235248-s1): un 0x1063 de un compañero suma sus golpes y NO manda "
+             "0x1062 al nuevo máster (evita caída 0x547440 buscando al slot 0 que se fue)",
+             r_golpe == [] and partida(ns[3]).get("golpes") == 1)
+    r_fin = responder(0x1064, bytes([2]), ns[2])
+    bajas_fin = [struct.unpack_from("<IH", x[1])[1] for x in r_fin if x[0] == 0x106E]
+    chequear("★ el nuevo máster manda bajas y el 0x1064 → cobran normal (0x1073/106E/106F, 2+2=4 bajas, EXP y desbloqueo)",
+             a_quien(r_fin, 0x1073, ns[2]) == [ns[2], ns[3]] and a_quien(r_fin, 0x106E, ns[2]) == [ns[2], ns[3]]
+             and bajas_fin == [4, 4] and not s.get("jugando")
+             and all(leer(m)["exp"] > exp_antes[m] and 1011 in leer(m)["terminadas"]
+                     and leer(m)["plata"] >= oro_antes[m] for m in ns[2:]),
+             bajas_fin)
 
-    # al máster se le corta el juego: lo mismo, con el tick
+    # al máster se le corta el juego (cerrada) en plena stage: traspaso con 0x1058 tipo 3 sin cerrar, y pueden
+    # terminar también por cerrar_por_bajas
     ns = jugadores(3)
     s = armar(94, ns)
+    for m in ns:
+        partida(m)["escenario"] = 1041
+    responder(0x1061, struct.pack("<H", 0) + bytes(6), ns[0])
     cerrada(ns[0])
-    tick(ns[1:])
-    chequear("★ al máster se le corta el juego: el mando pasa a otro de la stage", s["anfitrion"] in ns[1:])
-    r = responder(0x1064, bytes([0]), s["anfitrion"])
-    chequear("…y el fin llega a los dos que quedan", a_quien(r, 0x1073, s["anfitrion"]) == ns[1:])
+    r = tick(ns[1:])
+    chequear("★ al máster se le corta el juego: traspaso con 0x1058 tipo 3 y la stage SIGUE (sin 0x1073 inmediato)",
+             s["anfitrion"] == ns[1] and a_quien(r, 0x1058, None) == ns[1:]
+             and a_quien(r, 0x1073, None) == [] and s.get("jugando"))
+    for k in range(1, ESCENARIOS[1041][3]):
+        responder(0x1061, struct.pack("<H", k) + bytes(6), ns[1])
+    partida(ns[1])["cierre_bajas"] = time.monotonic() - 1
+    r_cb = tick(ns[1:])
+    chequear("…y si el nuevo máster completa todas las bajas (cerrar_por_bajas), cobran normal todos los que siguen",
+             a_quien(r_cb, 0x1073, None) == ns[1:] and not s.get("jugando"))
+
+    # guardia de stage trabada (1): traspaso y después 90 s sin bajas, con 76/78 (Stage 1012) → se cierra como
+    # terminada, con premio
+    ns = jugadores(3)
+    s = armar(97, ns)
+    for m in ns:
+        partida(m)["escenario"] = 1012
+    exp_97 = {m: leer(m)["exp"] for m in ns[1:]}
+    oro_97 = {m: leer(m)["plata"] for m in ns[1:]}
+    items_97 = {m: len(leer(m)["items"]) for m in ns[1:]}
+    responder(0x1074, b"", ns[0])                     # traspaso a ns[1]
+    for k in range(76):                               # 76/78 bajas (faltan 2 <= max(2, ceil(5% de 78)) = 4)
+        responder(0x1061, struct.pack("<H", k) + bytes(6), ns[1])
+    s["ultima_baja_stage"] = time.time() - (mod_partida.STAGE_TRABADA_POCAS - 10)
+    chequear("★ el revés: antes de los %g s sin bajas, la stage 76/78 sigue abierta" % mod_partida.STAGE_TRABADA_POCAS,
+             a_quien(tick(ns[1:]), 0x1073, None) == [] and s.get("jugando"))
+    s["ultima_baja_stage"] = time.time() - mod_partida.STAGE_TRABADA_POCAS - 1      # (45 s: faltan pocas)
+    r_76 = tick(ns[1:])
+    bajas_76 = [struct.unpack_from("<IH", x[1])[1] for x in r_76 if x[0] == 0x106E]
+    chequear("★ guardia stage trabada (76/78 tras 45 s sin bajas): se cierra como terminada (0x1073/106E/106F) con premio",
+             a_quien(r_76, 0x1073, None) == ns[1:] and a_quien(r_76, 0x106E, None) == ns[1:]
+             and bajas_76 == [76, 76] and not s.get("jugando")
+             and all(leer(m)["exp"] > exp_97[m] and 1012 in leer(m)["terminadas"]
+                     and (leer(m)["plata"] > oro_97[m] or len(leer(m)["items"]) > items_97[m]) for m in ns[1:]),
+             bajas_76)
+
+    # guardia de stage trabada (2): traspaso y después 90 s sin bajas, con 0/56 (Stage 1011) → se cierra sin premio,
+    # sin EXP ni desbloqueo, sin abandono, y nadie queda en la stage
+    ns = jugadores(3)
+    s = armar(98, ns)
+    for m in ns:
+        partida(m)["escenario"] = 1011
+    antes_98 = {m: dict(exp=leer(m)["exp"], plata=leer(m)["plata"], items=list(leer(m)["items"]),
+                        terminadas=list(leer(m)["terminadas"]), abandonos=leer(m)["abandonos"]) for m in ns[1:]}
+    responder(0x1074, b"", ns[0])                     # traspaso a ns[1], 0/56 bajas
+    s["ultima_baja_stage"] = time.time() - mod_partida.STAGE_TRABADA_POCAS - 1
+    chequear("★ el revés: con 0/56 (faltan muchas), a los %g s todavía NO se cierra (se esperan %g s: hay huecos "
+             "normales de casi 1 min)" % (mod_partida.STAGE_TRABADA_POCAS + 1, mod_partida.STAGE_TRABADA),
+             a_quien(tick(ns[1:]), 0x1069, None) == [] and s.get("jugando"))
+    s["ultima_baja_stage"] = time.time() - mod_partida.STAGE_TRABADA - 1
+    r_0 = tick(ns[1:])
+    chequear("★ guardia stage trabada (0/56 tras 90 s sin bajas): se cierra por game_over (0x1069 + 0x1075), sin 0x1073",
+             a_quien(r_0, 0x1069, None) == ns[1:] and a_quien(r_0, 0x1075, None) == ns[1:]
+             and a_quien(r_0, 0x1073, None) == [])
+    chequear("★ guardia stage trabada (0/56): sin premio, sin EXP ni desbloqueo, sin abandono, y nadie queda en la stage",
+             not s.get("en_stage") and not s.get("jugando") and 98 not in SALAS
+             and all(leer(m)["exp"] == antes_98[m]["exp"]
+                     and leer(m)["plata"] == antes_98[m]["plata"]
+                     and leer(m)["items"] == antes_98[m]["items"]
+                     and leer(m)["terminadas"] == antes_98[m]["terminadas"]
+                     and leer(m)["abandonos"] == antes_98[m]["abandonos"]
+                     and partida(m).get("sala") is None for m in ns[1:]))
+
+    # el máster se cuelga 60 s en plena stage → traspaso y SIN cierre (y desde ahí rige la guardia de 90 s)
+    ns = jugadores(3)
+    s = armar(99, ns)
+    for m in ns:
+        partida(m)["escenario"] = 1011
+    partida(ns[2])["ultimo_mensaje"] = time.time() - mod_partida.ESPERA_MASTER - 5
+    r_inv = tick(ns)
+    chequear("★ el revés: si el que se cuelga es un INVITADO (no el máster), no hay traspaso ni cierre",
+             a_quien(r_inv, 0x1058, None) == [] and a_quien(r_inv, 0x1073, None) == []
+             and a_quien(r_inv, 0x1069, None) == [] and s["anfitrion"] == ns[0] and s.get("jugando"))
+    partida(ns[2])["ultimo_mensaje"] = time.time()
+    partida(ns[0])["ultimo_mensaje"] = time.time() - mod_partida.ESPERA_MASTER - 5
+    r_colg = tick(ns)
+    chequear("★ el máster se cuelga %g s → traspaso (0x1058 tipo 3 a los demás) y SIN cierre"
+             % mod_partida.ESPERA_MASTER,
+             s["anfitrion"] == ns[1] and a_quien(r_colg, 0x1058, None) == ns[1:]
+             and a_quien(r_colg, 0x1073, None) == [] and a_quien(r_colg, 0x1069, None) == []
+             and a_quien(r_colg, 0x1075, None) == [] and s.get("jugando")
+             and sorted(s["en_stage"]) == ns[1:] and bool(s.get("traspaso_master")))
+    # si el máster colgado vuelve después, ya fue sacado de la sala: sus 0x105C/0x1061 no interfieren (sin dos máster)
+    bajas_antes_colg = s.get("muertos_stage", 0)
+    chequear("★ si el máster colgado vuelve después: no quedan dos máster (sus 0x105C y 0x1061 se ignoran en la sala)",
+             responder(0x105C, b"\1\2\3\4", ns[0]) == []
+             and responder(0x1061, struct.pack("<H", 9) + bytes(6), ns[0]) == []
+             and s.get("muertos_stage", 0) == bajas_antes_colg)
+
+    # el revés: una stage en grupo SIN traspaso, 90 s sin bajas → NO se cierra
+    ns = jugadores(2)
+    s = armar(100, ns)
+    for m in ns:
+        partida(m)["escenario"] = 1011
+        partida(m)["inicio"] = time.time() - mod_partida.STAGE_TRABADA - 30
+        partida(m)["ultimo_mensaje"] = time.time()
+    s["ultima_baja_stage"] = time.time() - mod_partida.STAGE_TRABADA - 30
+    r_sin_traspaso = tick(ns)
+    chequear("★ el revés: una stage en grupo SIN traspaso, %g s sin bajas → NO se cierra" % mod_partida.STAGE_TRABADA,
+             a_quien(r_sin_traspaso, 0x1073, None) == [] and a_quien(r_sin_traspaso, 0x1069, None) == []
+             and a_quien(r_sin_traspaso, 0x1075, None) == [] and s.get("jugando")
+             and sorted(s["en_stage"]) == ns)
+
+    # el revés: en solitario, 90 s sin bajas → NO se cierra
+    ns_solo = jugadores(1)
+    s_solo = armar(101, ns_solo)
+    partida(ns_solo[0])["escenario"] = 1011
+    partida(ns_solo[0])["inicio"] = time.time() - mod_partida.STAGE_TRABADA - 30
+    partida(ns_solo[0])["ultimo_mensaje"] = time.time() - mod_partida.STAGE_TRABADA - 30
+    s_solo["ultima_baja_stage"] = time.time() - mod_partida.STAGE_TRABADA - 30
+    r_solo = tick(ns_solo)
+    chequear("★ el revés: en solitario, %g s sin bajas → NO se cierra" % mod_partida.STAGE_TRABADA,
+             a_quien(r_solo, 0x1073, None) == [] and a_quien(r_solo, 0x1069, None) == []
+             and a_quien(r_solo, 0x1075, None) == [] and s_solo.get("jugando"))
 
     # dos partidas a la vez: el fin de una no toca la otra
     a, b = jugadores(3), jugadores(2)
@@ -1819,6 +2123,108 @@ def pruebas_fin_stage_grupo(chequear):
     for k in list(SALAS):
         if k >= 80:
             SALAS.pop(k, None)
+
+
+def pruebas_diag_recepcion(chequear):
+    """★ (21-nov) POST /eda/diag (servidor/diag.py): los diagnósticos de los clientes beta, firmados con el ticket de su
+    sesión sin mandarlo, con sus límites, y sin nada con forma de dato privado."""
+    import shutil
+    import tempfile
+    from servidor import diag
+    viejo_estado, viejo_activo = config.ESTADO, diag.ACTIVO
+    config.ESTADO = tempfile.mkdtemp(prefix="diag_")
+    diag._ULTIMO_LOTE.clear()
+    diag._RITMO.clear()
+    T = "TICKET-DE-PRUEBA-0123"
+    tickets = {"777": [T]}
+    buscar = lambda c: tickets.get(c, [])          # noqa: E731
+    ahora = 1_795_300_000_000
+    ses = "0123456789abcdef0123456789abcdef"
+
+    def lote(n, eventos, cuenta="777", hora=None, ticket=T, sesion=ses, cuerpo=None, firma_cuenta=None):
+        cuerpo = cuerpo if cuerpo is not None else "\n".join(json.dumps(e) for e in eventos).encode()
+        hora = ahora if hora is None else hora
+        cab = {"X-EDA-Cuenta": cuenta, "X-EDA-Sesion": sesion, "X-EDA-Lote": str(n), "X-EDA-Hora": str(hora),
+               "X-EDA-Firma": diag.firma(ticket, hora, sesion, n, cuerpo, firma_cuenta or cuenta)}
+        return diag.recibir(cab, cuerpo, ahora, buscar)
+    ev = [{"t": ahora - 5000, "m": 12345, "e": "escena", "a": "stage"},
+          {"t": ahora - 4000, "e": "caida", "codigo": "C0000005", "sitio": "0x7F4626", "modulo": "exe"},
+          {"t": ahora - 3000, "e": "foco", "ticket": T, "mac": "02:00:00:00:00:01", "ip_privada": "192.168.1.9",
+           "nota": "va a 198.51.100.7", "texto_chat": "hola"}]
+    c, r = lote(1, ev)
+    chequear("diag: un lote firmado con el ticket de su sesión → 200 y se guardan los 3 eventos", c == 200 and r.get("guardados") == 3, (c, r))
+    arch = os.path.join(config.ESTADO, "diag", time.strftime("%Y-%m-%d", time.gmtime(ahora / 1000)), "777-%s.jsonl" % ses)
+    texto = open(arch, encoding="utf-8").read() if os.path.exists(arch) else ""
+    chequear("diag: por cuenta y sesión, con la hora de llegada y la diferencia de reloj", '"r":%d' % ahora in texto and '"dr":0' in texto)
+    chequear("★ diag: nada con forma de dato privado (ticket, MAC, IP, texto del chat) queda guardado",
+             T not in texto and "02:00:00" not in texto and "192.168" not in texto and "198.51" not in texto and "hola" not in texto,
+             texto[-300:])
+    chequear("★ diag: el revés: un lote repetido o viejo → 409", lote(1, ev)[0] == 409)
+    chequear("★ diag: el revés: firmado con OTRO ticket → 401", lote(2, ev, ticket="otro")[0] == 401)
+    chequear("★ diag: el revés: otra cuenta con la firma de ésta → 401", lote(2, ev, cuenta="888")[0] == 401)
+    tickets["888"] = [T]                          # (aunque las dos cuentas tuvieran el mismo ticket)
+    chequear("★ diag: el revés: la firma lleva la cuenta: firmada para 777 y mandada como 888 → 401",
+             lote(2, ev, cuenta="888", firma_cuenta="777")[0] == 401)
+    tickets.pop("888")
+    chequear("★ diag: el ticket NO es la clave (clave derivada «eda-diag-v1»): firmar con el ticket a secas no sirve",
+             diag.clave(T) != T.encode() and lote(2, ev, ticket=diag.clave(T).hex())[0] == 401)
+    diag._ULTIMO_LOTE.clear()                     # (como si el server se hubiera reiniciado)
+    chequear("★ diag: después de un reinicio, un lote viejo sigue rechazado (la marca está en disco)", lote(1, ev)[0] == 409)
+    chequear("★ diag: el revés: la hora a más de 10 min → 401", lote(2, ev, hora=ahora - 11 * 60 * 1000)[0] == 401)
+    chequear("★ diag: el revés: un cuerpo de más de 64 KB → 413", lote(2, [], cuerpo=b"x" * (65 * 1024))[0] == 413)
+    chequear("★ diag: el revés: una sesión con otra forma → 400", lote(2, ev, sesion="mi-pc")[0] == 400)
+    codigos = [lote(n, ev[:1])[0] for n in range(10, 30)]
+    chequear("★ diag: más de 12 lotes por minuto de una cuenta → 429 (y antes, 200)", codigos.count(200) >= 1 and codigos[-1] == 429, codigos)
+    # la poda: lo de más de 14 días se va, lo de hoy nunca
+    base = os.path.join(config.ESTADO, "diag")
+    for dia in ("2026-10-01", "2026-11-20"):
+        os.makedirs(os.path.join(base, dia), exist_ok=True)
+        open(os.path.join(base, dia, "1-%s.jsonl" % ("0" * 32)), "w").write("x" * 1000)
+    borrados = diag.podar(ahora, dias=14, max_mb=500)
+    hoy = time.strftime("%Y-%m-%d", time.gmtime(ahora / 1000))
+    chequear("diag: la poda borra lo de más de 14 días y deja lo reciente", borrados == ["2026-10-01"]
+             and os.path.isdir(os.path.join(base, "2026-11-20")) and os.path.isdir(os.path.join(base, hoy)), borrados)
+    diag.podar(ahora, dias=14, max_mb=0)
+    chequear("★ diag: con el tope lleno se borra lo más viejo, pero NUNCA lo de hoy", os.path.isdir(os.path.join(base, hoy))
+             and not os.path.isdir(os.path.join(base, "2026-11-20")))
+    # por HTTP: apagado (prod) → 404; prendido → 200
+    from servidor import red
+    import threading
+    import urllib.request
+    import urllib.error
+    srv = red.servidor_http(("127.0.0.1", 0))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = "http://127.0.0.1:%d/eda/diag" % srv.server_address[1]
+
+    def post(cuerpo, cab):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, data=cuerpo, headers=cab, method="POST"), timeout=5) as rr:
+                return rr.status
+        except urllib.error.HTTPError as e:
+            return e.code
+    diag.ACTIVO = False
+    chequear("★ diag por HTTP: sin EDA_DIAG (prod) → 404, como cualquier ruta que no existe", post(b"{}", {}) == 404)
+    diag.ACTIVO = True
+    diag._RITMO.clear()
+    viejos = diag.tickets_de
+    try:
+        diag.tickets_de = buscar
+        hora = int(time.time() * 1000)
+        cuerpo = json.dumps({"t": hora, "e": "inicio"}).encode()
+        cab = {"X-EDA-Cuenta": "777", "X-EDA-Sesion": "f" * 32, "X-EDA-Lote": "1", "X-EDA-Hora": str(hora),
+               "X-EDA-Firma": diag.firma(T, hora, "f" * 32, 1, cuerpo, "777"), "Content-Type": "application/x-ndjson"}
+        # (recibir usa tickets_de por defecto: se cambia para la prueba)
+        diag.recibir.__defaults__ = (None, buscar)
+        chequear("diag por HTTP: con EDA_DIAG=1, un lote bien firmado → 200", post(cuerpo, cab) == 200)
+        cab["X-EDA-Lote"] = "2"
+        chequear("★ diag por HTTP: el revés: la firma no corresponde al cuerpo → 401", post(cuerpo + b" ", cab) == 401)
+    finally:
+        diag.tickets_de = viejos
+        diag.recibir.__defaults__ = (None, viejos)
+        srv.shutdown()
+        diag.ACTIVO = viejo_activo
+        shutil.rmtree(config.ESTADO, ignore_errors=True)
+        config.ESTADO = viejo_estado
 
 def pruebas_lista_servidores(chequear):
     """★ La lista de servidores (0x070B) con los jugadores de verdad."""
@@ -2130,6 +2536,406 @@ def pruebas_login(chequear):
         for x in (jwks, os.path.join(config.ESTADO, "control_porteria.db")):
             if os.path.exists(x):
                 os.remove(x)
+
+
+def pruebas_sesion_unica_y_gm(chequear):
+    """★ (22-nov) 1) Una sola sesión por cuenta: si entra otra sesión con la misma cuenta, la vieja sale limpia
+    (guardando la cuenta sin pisar lo que haga la nueva, sacándola de su sala con traspaso de máster, del messenger
+    y del relay, y cerrando su socket) y la nueva sigue. 2) Comandos de GM solo para cuentas en EDA_GM_CUENTAS,
+    con /oro +N, /oro N <personaje>, /item <id> [cant] [personaje] y registro de auditoría."""
+    import socket
+    from servidor import juego, red, salas
+    from servidor.estado import VIVO
+    from servidor.cuentas import ruta_cuenta
+    from servidor.objetos import obj_equipo, obj_stats
+    from servidor.relay import escribir_relay
+
+    def _chat(texto):
+        t = texto.encode("utf-16-le")
+        return struct.pack("<BII", 1, 0xFFFFFFFF, 0) + struct.pack("<I", len(t)) + t
+
+    gm_antes = config.GM_CUENTAS
+    gm_en_vivo_antes = config.GM_EN_VIVO
+    relay_antes = config.RELAY_IP
+    log_antes_gm, log_antes_red = salas.log_gm, red.log
+    logs_gm = []
+    salas.log_gm = lambda m: logs_gm.append(m)
+    red.log = lambda m: None
+    try:
+        # ── 1) UNA SOLA SESIÓN POR CUENTA ──
+        ASIGNADAS.clear()
+        PARTIDAS.clear()
+        SALAS.clear()
+        VIVO.__dict__.setdefault("DESCONECTADAS", set()).clear()
+        config.RELAY_IP = "203.0.113.9"
+        s_a, s_b = socket.socketpair()
+        con501 = {"cli": s_a, "cola": __import__("queue").Queue()}
+        red.CONEXIONES[501] = con501
+        try:
+            r1 = responder(0x100F, cuerpo_100f("cuenta_unica"), 501)
+            responder(0x1011, b"\1\0\0\0", 501)
+            d1 = leer(501)
+            d1["plata"] = 88888
+            guardar(d1)
+            chequear("sesión única: la 1.ª conexión (#501) entra con cuenta_unica y está en ASIGNADAS y relay.json",
+                     r1[0][0] == 0x1010 and ASIGNADAS.get(501) == "cuenta_unica"
+                     and "501" in json.load(open(config.RELAY_MAPA)))
+
+            # Entra la 2.ª conexión (#502) con la MISMA cuenta
+            r2 = responder(0x100F, cuerpo_100f("cuenta_unica"), 502)
+            chequear("★ sesión única: entra #502 con la misma cuenta → #501 se cierra y sale de ASIGNADAS, PARTIDAS y relay",
+                     r2[0][0] == 0x1010 and 501 not in ASIGNADAS and 501 not in PARTIDAS
+                     and con501.get("cortada") is True and ASIGNADAS.get(502) == "cuenta_unica"
+                     and "501" not in json.load(open(config.RELAY_MAPA)))
+            r2_sel = responder(0x1011, b"\1\0\0\0", 502)
+            chequear("★ sesión única: la cuenta de #501 se guardó antes de soltarla (#502 recibe plata=88888 en 0x1012)",
+                     r2_sel[0][0] == 0x1012 and leer(502)["plata"] == 88888
+                     and struct.unpack_from("<I", r2_sel[0][1], 0x13)[0] == 88888)
+
+            # La sesión nueva (#502) cambia su oro a 99999; un paquete tardío o el cierre final de #501 NO la pisa
+            d2 = leer(502)
+            d2["plata"] = 99999
+            guardar(d2)
+            r_tardio = responder(0x1027, b"\0" * 4, 501)
+            cerrada(501)
+            chequear("★ el revés: paquetes tardíos o el cierre final de la conexión vieja (#501) NO pisan la cuenta de la nueva (#502)",
+                     r_tardio == [] and ASIGNADAS.get(502) == "cuenta_unica"
+                     and leer(502)["plata"] == 99999 and json.load(open(ruta_cuenta("cuenta_unica")))["plata"] == 99999)
+        finally:
+            red.CONEXIONES.pop(501, None)
+            s_a.close()
+            s_b.close()
+        cerrada(502)
+
+        # ★ el revés en modo «pase»: un 0x100F rechazado (ticket malo → 0x66) NO desconecta a la sesión activa
+        login_antes = config.LOGIN
+        try:
+            ASIGNADAS[505] = "en_777001"
+            leer(505)["plata"] = 54321
+            config.LOGIN = "pase"
+            r_mal = responder(0x100F, cuerpo_100f("777001", "TICKET_FALSO_1234567"), 506)
+            chequear("★ el revés: un intento de login rechazado (0x66) NO desconecta a la sesión activa",
+                     struct.unpack_from("<H", r_mal[0][1])[0] == 0x66
+                     and ASIGNADAS.get(505) == "en_777001" and 506 not in ASIGNADAS)
+        finally:
+            config.LOGIN = login_antes
+            cerrada(505)
+
+        # ── Traspaso de máster al desconectar la sesión vieja ──
+        # a) Vieja en una SALA DE ESPERA como máster
+        responder(0x100F, cuerpo_100f("cuenta_master_sala"), 510)
+        responder(0x1011, b"\1\0\0\0", 510)
+        responder(0x100F, cuerpo_100f("cuenta_inv_sala"), 511)
+        responder(0x1011, b"\1\0\0\0", 511)
+        sala_b = bytearray(0x59)
+        struct.pack_into("<I", sala_b, 0x28, 1011)
+        sala_b[0x2F] = 3
+        responder(0x101D, bytes(4) + bytes(sala_b), 510)
+        num_sala = partida(510)["sala"]
+        responder(0x101F, struct.pack("<IH", 0, num_sala) + bytes(20), 511)
+        r_dup_sala = responder(0x100F, cuerpo_100f("cuenta_master_sala"), 512)
+        traspaso_511 = [x for x in r_dup_sala if x[0] == 0x1058 and len(x) > 3 and x[3] == 511 and x[1][1:3] == b"\x03\x00"]
+        chequear("★ sesión vieja era máster en SALA: al entrar la nueva (#512), la vieja (#510) sale y #511 recibe el traspaso (0x1058 tipo 3)",
+                 510 not in SALAS[num_sala]["miembros"] and SALAS[num_sala]["anfitrion"] == 511
+                 and bool(traspaso_511) and traspaso_511[0][1][3] == SALAS[num_sala]["numeros"][511]
+                 and ASIGNADAS.get(512) == "cuenta_master_sala")
+        cerrada(511)
+        cerrada(512)
+        SALAS.pop(num_sala, None)
+
+        # b) Vieja en plena STAGE como máster
+        responder(0x100F, cuerpo_100f("cuenta_master_stage"), 520)
+        responder(0x1011, b"\1\0\0\0", 520)
+        responder(0x100F, cuerpo_100f("cuenta_inv_stage"), 521)
+        responder(0x1011, b"\1\0\0\0", 521)
+        responder(0x101D, bytes(4) + bytes(sala_b), 520)
+        num_st = partida(520)["sala"]
+        responder(0x101F, struct.pack("<IH", 0, num_st) + bytes(20), 521)
+        responder(0x1047, bytes([SALAS[num_st]["numeros"][521], 1]), 521)
+        responder(0x104E, b"", 520)
+        responder(0x105F, b"\0" * 4, 520)
+        responder(0x105F, b"\0" * 4, 521)
+        for k in range(12):
+            responder(0x1061, struct.pack("<H", k + 1) + bytes(6), 520)
+        r_dup_st = responder(0x100F, cuerpo_100f("cuenta_master_stage"), 522)
+        traspaso_521 = [x for x in r_dup_st if x[0] == 0x1058 and len(x) > 3 and x[3] == 521 and x[1][1:3] == b"\x03\x00"]
+        chequear("★ sesión vieja era máster en STAGE: al entrar #522, #521 recibe el traspaso (0x1058 tipo 3), la stage sigue y conserva las 12 bajas",
+                 SALAS[num_st]["anfitrion"] == 521 and SALAS[num_st].get("jugando") is True
+                 and bool(SALAS[num_st].get("traspaso_master")) and SALAS[num_st].get("muertos_stage") == 12
+                 and bool(traspaso_521) and not any(x[0] in (0x1073, 0x106E) for x in r_dup_st))
+        r_fin_521 = responder(0x1064, bytes([SALAS[num_st]["numeros"][521]]), 521)
+        chequear("…y el nuevo máster (#521) puede cerrar la stage (0x1064 → 0x1073/0x106E con las 12 bajas)",
+                 any(x[0] == 0x1073 for x in r_fin_521)
+                 and [struct.unpack_from("<IH", x[1])[1] for x in r_fin_521 if x[0] == 0x106E] == [12])
+        cerrada(521)
+        cerrada(522)
+        SALAS.pop(num_st, None)
+
+        # c) Vieja cargando stage (0x104E enviado, el invitado ya mandó 0x105F y esperaba a la vieja)
+        responder(0x100F, cuerpo_100f("cuenta_carga"), 530)
+        responder(0x1011, b"\1\0\0\0", 530)
+        responder(0x100F, cuerpo_100f("cuenta_inv_carga"), 531)
+        responder(0x1011, b"\1\0\0\0", 531)
+        responder(0x101D, bytes(4) + bytes(sala_b), 530)
+        num_cg = partida(530)["sala"]
+        responder(0x101F, struct.pack("<IH", 0, num_cg) + bytes(20), 531)
+        responder(0x1047, bytes([SALAS[num_cg]["numeros"][531], 1]), 531)
+        responder(0x104E, b"", 530)
+        responder(0x105F, b"\0" * 4, 531)                 # #531 ya cargó; falta #530
+        r_dup_cg = responder(0x100F, cuerpo_100f("cuenta_carga"), 532)
+        chequear("★ sesión vieja cargando stage: al desplazarse #530, #531 (que ya mandó 0x105F) recibe 0x105E y arranca sin colgarse",
+                 any(x[0] == 0x105E and len(x) > 3 and x[3] == 531 for x in r_dup_cg))
+        cerrada(531)
+        cerrada(532)
+        SALAS.pop(num_cg, None)
+
+        # ── 2) COMANDOS DE GM (/oro +N, /oro N <personaje>, /item, solo GM y auditoría) ──
+        responder(0x100F, cuerpo_100f("gm_prueba"), 540)
+        responder(0x1011, b"\1\0\0\0", 540)
+        d_gm = leer(540)
+        d_gm["nick"] = "JefeGM"
+        d_gm["pjs"][0]["nick"] = "JefeGM"
+        guardar(d_gm)
+
+        responder(0x100F, cuerpo_100f("jugador_normal"), 541)
+        responder(0x1011, b"\1\0\0\0", 541)
+        d_jug = leer(541)
+        d_jug["nick"] = "Aventurero"
+        d_jug["pjs"][0]["nick"] = "Aventurero"
+        d_jug["plata"] = 1000
+        guardar(d_jug)
+
+        config.GM_CUENTAS = "gm_prueba, otro_gm"
+        config.GM_EN_VIVO = False
+        responder(0x1017, b"", 540)
+        responder(0x1017, b"", 541)
+        chequear("es_gm reconoce las cuentas en EDA_GM_CUENTAS y rechaza al resto",
+                 salas.es_gm("gm_prueba") and salas.es_gm("otro_gm") and not salas.es_gm("jugador_normal"))
+
+        aviso_refresco = "se ve al volver a la pantalla de personajes".encode("utf-16-le")
+        # /oro N y /oro +N propio
+        logs_gm.clear()
+        r = responder(0x100D, _chat("/oro 10000"), 540)
+        chequear("GM: /oro 10000 fija su propio oro en 10000",
+                 leer(540)["plata"] == 10000 and [x[0] for x in r] == [0x1005]
+                 and aviso_refresco in r[0][1] and "10000".encode("utf-16-le") in r[0][1])
+        r = responder(0x100D, _chat("/oro +2500"), 540)
+        chequear("GM: /oro +2500 suma 2500 al oro actual (10000 → 12500)",
+                 leer(540)["plata"] == 12500 and "12500".encode("utf-16-le") in r[0][1])
+        r = responder(0x100D, _chat("/oro +2000000000"), 540)
+        chequear("GM: /oro +N respeta el tope de 2_000_000_000",
+                 leer(540)["plata"] == 2_000_000_000)
+
+        # /oro N <personaje> y /oro +N <personaje> a otro jugador conectado
+        r = responder(0x100D, _chat("/oro 40000 Aventurero"), 540)
+        chequear("GM: /oro 40000 Aventurero fija en 40000 el oro del otro jugador conectado y les avisa a los dos",
+                 leer(541)["plata"] == 40000 and len(r) == 2 and all(aviso_refresco in x[1] for x in r)
+                 and any(len(x) > 3 and x[3] == 541 and "40000".encode("utf-16-le") in x[1] for x in r))
+        r = responder(0x100D, _chat("/oro +5000 aventurero"), 540)
+        chequear("GM: /oro +5000 aventurero (sin importar mayúsculas) suma 5000 al otro jugador (40000 → 45000)",
+                 leer(541)["plata"] == 45000 and len(r) == 2
+                 and any(len(x) > 3 and x[3] == 541 and "45000".encode("utf-16-le") in x[1] for x in r))
+        r_no = responder(0x100D, _chat("/oro 1000 NoConectado"), 540)
+        chequear("★ el revés: /oro N a un personaje que no está conectado avisa y no cambia nada",
+                 "no está conectado".encode("utf-16-le") in r_no[0][1] and leer(541)["plata"] == 45000)
+
+        # /item <id> [cant] <personaje> a otro jugador conectado
+        r_it = responder(0x100D, _chat("/item 26001 7 Aventurero"), 540)
+        it_541 = next((x for x in leer(541)["items"] if x[0] == 26001), None)
+        chequear("GM: /item 26001 7 Aventurero entrega el ítem al otro jugador conectado y avisa a los dos",
+                 it_541 is not None and it_541[1] >= 7 and len(r_it) == 2
+                 and any(len(x) > 3 and x[3] == 541 and "26001".encode("utf-16-le") in x[1] for x in r_it))
+
+        jugador = leer(541)
+        jugador["exp"] = EXPS[4]
+        guardar(jugador)
+        r = responder(0x100D, _chat("/stats Aventurero 1 2 0 0 0"), 540)
+        chequear("GM cambia los stats ajenos y avisa a ambos",
+                 leer(541)["stats"] == [1, 2, 0, 0, 0] and [x[0] for x in r] == [0x1005, 0x1005]
+                 and r[1][3] == 541 and all(aviso_refresco in x[1] for x in r))
+        r = responder(0x100D, _chat("/reiniciar Aventurero"), 540)
+        puntos = PUNTOS_POR_NIVEL * 4
+        chequear("GM devuelve todos los puntos del nivel y conserva EXP, oro e inventario",
+                 stats_de(leer(541)) == [0] * 5 + [puntos] and len(r) == 2
+                 and all(aviso_refresco in x[1] for x in r)
+                 and all(leer(541)[k] == jugador[k] for k in ("exp", "plata", "items")))
+        responder(0x102F, struct.pack("<I6H", 541, puntos, 0, 0, 0, 0, puntos), 541)
+        chequear("El jugador puede volver a repartir todos los puntos",
+                 stats_de(leer(541)) == [puntos, 0, 0, 0, 0, 0])
+        jugador = leer(541)
+        jugador["pjs"].append(dict(jugador["pjs"][0], nick="Reserva", lugar=1))
+        guardar(jugador)
+        cuenta = ASIGNADAS.pop(541)
+        try:
+            responder(0x100D, _chat("/stats Reserva 1 1 1 1 1"), 540)
+            with open(ruta_cuenta(cuenta), encoding="utf-8") as archivo:
+                chequear("GM fija stats del personaje desconectado", json.load(archivo)["pjs"][1]["stats"] == [1] * 5)
+            r = responder(0x100D, _chat("/reset Reserva"), 540)
+            with open(ruta_cuenta(cuenta), encoding="utf-8") as archivo:
+                datos = json.load(archivo)
+            chequear("GM reinicia al personaje desconectado sin cambiar el seleccionado",
+                     datos["activo"] == 0 and datos["pjs"][0] == jugador["pjs"][0]
+                     and datos["pjs"][1]["stats"] == [0] * 5 and len(r) == 1 and aviso_refresco in r[0][1])
+        finally:
+            ASIGNADAS[541] = cuenta
+        for comando in ("/reiniciar Ausente", "/stats Ausente 1 2 3 4 5"):
+            r = responder(0x100D, _chat(comando), 540)
+            chequear(comando + " informa que el personaje no existe", "no existe".encode("utf-16-le") in r[0][1])
+        chequear("La auditoría identifica cuenta y personaje incluso desconectado",
+                 any("/reset Reserva" in linea and "jugador_normal (Reserva)" in linea for linea in logs_gm))
+
+        # Auditoría en server.log
+        chequear("★ auditoría: cada comando de GM queda registrado en server.log con quién, qué y a quién",
+                 any("gm: #540 (gm_prueba)" in m and "/oro 40000 Aventurero" in m and "jugador_normal" in m for m in logs_gm)
+                 and any("gm: #540 (gm_prueba)" in m and "/item 26001 7 Aventurero" in m for m in logs_gm),
+                 logs_gm)
+
+        config.GM_EN_VIVO = True
+        experimental = "actualizado en vivo (experimental)".encode("utf-16-le")
+        for comando, destino, saldo in (("/oro -25", 540, 1_999_999_975),
+                                        ("/oro -50 Aventurero", 541, 44950),
+                                        ("/oro -100000 Aventurero", 541, 0)):
+            r = responder(0x100D, _chat(comando), 540)
+            chequear(comando + " resta con piso 0 y refresca solo al destino en lobby",
+                     leer(destino)["plata"] == saldo
+                     and r[0] == (0x103A, struct.pack("<HIB", 1, saldo, 0), 0, destino)
+                     and all(x[0] == 0x1005 and experimental in x[1] for x in r[1:]))
+        chequear("GM audita la quita de oro",
+                 any("/oro -100000 Aventurero" in linea and "oro 44950 -> 0" in linea for linea in logs_gm))
+        responder(0x100D, _chat("/oro 2000000000"), 540)
+        for comando, destino in (("/stats 1 0 0 0 0", 540),
+                                 ("/stats Aventurero 1 2 0 0 0", 541), ("/reiniciar Aventurero", 541)):
+            equipo_antes = obj_equipo(leer(destino))
+            r = responder(0x100D, _chat(comando), 540)
+            esperado = b"\1\0\0" + obj_stats(leer(destino)) + equipo_antes + bytes(4)
+            chequear(comando + " refresca los stats y el equipo actual solo al destino en lobby",
+                     r[0] == (0x102C, esperado, 0, destino)
+                     and all(x[0] == 0x1005 and experimental in x[1] for x in r[1:]))
+        r = responder(0x100D, _chat("/reiniciar Reserva"), 540)
+        chequear("Un personaje no seleccionado no refresca el personaje activo",
+                 all(x[0] == 0x1005 and aviso_refresco in x[1] for x in r))
+        responder(0x1027, b"", 541)
+        r = responder(0x100D, _chat("/oro +1 Aventurero"), 540)
+        chequear("La tienda no recibe refresco experimental", all(x[0] == 0x1005 for x in r))
+        responder(0x101D, bytes(4) + bytes(sala_b), 541)
+        sala_destino = SALAS[partida(541)["sala"]]
+        r = responder(0x100D, _chat("/oro +1 Aventurero"), 540)
+        chequear("Una sala que espera recibe el refresco", r[0] == (0x103A, struct.pack("<HIB", 1, 2, 0), 0, 541))
+        responder(0x104E, b"", 541)
+        r = responder(0x100D, _chat("/oro +1 Aventurero"), 540)
+        chequear("El destino que carga no recibe refresco experimental", all(x[0] == 0x1005 for x in r))
+        responder(0x105F, bytes(4), 541)
+        chequear("El destino de los comandos GM está en plena stage",
+                 sala_destino.get("jugando") and 541 in sala_destino["en_stage"])
+        cabecera = struct.pack("<HBII", 0, 4, 0xFF00FF00, 0) + "[Sistema]".encode("utf-16-le").ljust(26, b"\0")
+        for comando in ("/oro +1 Aventurero", "/stats Aventurero 1 0 0 0 0", "/reiniciar Aventurero"):
+            r = responder(0x100D, _chat(comando), 540)
+            chequear(comando + " en stage solo envía el aviso al GM y al destino",
+                     len(r) == 2 and r[0][0] == 0x1005 and r[0][2:] == (0,) and r[1] == r[0] + (541,)
+                     and r[0][1].startswith(cabecera) and r[0][1].endswith(aviso_refresco)
+                     and struct.unpack_from("<I", r[0][1], 37)[0] == len(r[0][1]) - 41)
+
+        # ★ el revés: una cuenta que NO es GM no puede usar ningún comando de GM
+        oro_541 = leer(541)["plata"]
+        mon_541 = leer(541)["monedas"]
+        exp_541 = leer(541)["exp"]
+        stats_541 = list(stats_de(leer(541)))
+        items_541 = [list(x) for x in leer(541)["items"]]
+        terminadas_antes = {n: leer(n)["terminadas"] for n in (540, 541)}
+        logs_antes = len(logs_gm)
+        for cmd in ("/oro 999999", "/oro +5000", "/oro 1000 JefeGM", "/oro -1", "/oro -1 JefeGM", "/monedas 50",
+                    "/nivel 30", "/item 26001 5", "/stats 99 99 99 99 99", "/stats Reserva 1 2 3 4 5",
+                    "/reiniciar Aventurero", "/reset Reserva", "/limpiar", "/cash 100",
+                    "/fin", "/desbloquear", "/desbloquear JefeGM"):
+            r_rech = responder(0x100D, _chat(cmd), 541)
+            chequear("★ el revés (no GM): «%s» no hace nada y responde Comando desconocido (sin revelar GM)" % cmd,
+                     len(r_rech) == 1 and r_rech[0][0] == 0x1005
+                     and "Comando desconocido".encode("utf-16-le") in r_rech[0][1]
+                     and "GM".encode("utf-16-le") not in r_rech[0][1])
+        d_despues = leer(541)
+        chequear("★ el revés (no GM): oro, monedas, nivel, stats e ítems del jugador quedan intactos",
+                 d_despues["plata"] == oro_541 and d_despues["monedas"] == mon_541
+                 and d_despues["exp"] == exp_541 and list(stats_de(d_despues)) == stats_541
+                 and d_despues["items"] == items_541 and leer(540)["plata"] == 2_000_000_000
+                 and all(leer(n)["terminadas"] == lista for n, lista in terminadas_antes.items())
+                 and sala_destino["jugando"] and not partida(541)["resultado_guardado"]
+                 and len(logs_gm) == logs_antes)
+        r_msn = responder(0x100D, _chat("/messenger"), 541)
+        chequear("★ el revés (no GM): /messenger sigue disponible para todos",
+                 len(r_msn) == 2 and any("Messenger:".encode("utf-16-le") in x[1] for x in r_msn))
+
+        r = responder(0x100D, _chat("/ayuda"), 540)
+        chequear("La ayuda de GM incluye /fin y /desbloquear",
+                 all(x.encode("utf-16-le") in r[0][1] for x in ("/fin", "/desbloquear [pj]")))
+        r = responder(0x100D, _chat("/fin"), 540)
+        chequear("GM sin stage recibe el aviso de /fin",
+                 [x[0] for x in r] == [0x1005] and "Debes estar en una stage".encode("utf-16-le") in r[0][1])
+        responder(0x1074, b"", 541)
+        responder(0x101D, bytes(4) + bytes(sala_b), 541)
+        num = partida(541)["sala"]
+        sala = SALAS[num]
+        responder(0x101F, struct.pack("<IH", 0, num), 540)
+        responder(0x1047, bytes([sala["numeros"][540], 1]), 540)
+        responder(0x104E, b"", 541)
+        responder(0x105F, bytes(4), 540)
+        r = responder(0x100D, _chat("/fin"), 540)
+        chequear("/fin espera a que cargue todo el grupo",
+                 [x[0] for x in r] == [0x1005] and not partida(540)["resultado_guardado"])
+        responder(0x105F, bytes(4), 541)
+        escenario = partida(541)["escenario"]
+        _, premios = tabla_premios().get(escenario, (0, []))
+        oro_premio = sum(dato for tipo, dato, _ in premios if tipo == 0)
+        exp_premio = 1 + sum(dato for tipo, dato, _ in premios if tipo == 1)
+        antes = {n: leer(n) for n in (540, 541)}
+        r = responder(0x100D, _chat("/fin"), 540)
+        salida_normal = ((0x1073, 0), (0x106E, 300), (0x106F, 8000))
+        chequear("/fin de un GM invitado entrega PlayEnd, resultado y cartas a ambos",
+                 [(x[0], x[2], x[3]) for x in r] ==
+                 [(op, espera, n) for n in (541, 540) for op, espera in salida_normal]
+                 and not sala["jugando"] and not sala["en_stage"])
+        for n, datos in antes.items():
+            despues = leer(n)
+            chequear("/fin registra y paga el premio normal a #%s" % n,
+                     partida(n)["resultado_guardado"] and escenario in despues["terminadas"]
+                     and despues["partidas"] == datos["partidas"] + 1 and despues["abandonos"] == datos["abandonos"]
+                     and despues["plata"] == datos["plata"] + oro_premio
+                     and despues["exp"] == datos["exp"] + exp_premio)
+        r = responder(0x100D, _chat("/fin"), 540)
+        chequear("/fin repetido no vuelve a pagar",
+                 [x[0] for x in r] == [0x1005] and all(leer(n)["partidas"] == antes[n]["partidas"] + 1 for n in antes)
+                 and sum(" · /fin · " in linea for linea in logs_gm) == 1)
+
+        for comando, n in (("/desbloquear", 540), ("/desbloquear Aventurero", 541)):
+            r = responder(0x100D, _chat(comando), 540)
+            chequear(comando + " guarda todo el catálogo y avisa si hay que volver a personajes",
+                     leer(n)["terminadas"] == sorted(ESCENARIOS)
+                     and all(x[0] == 0x1005 and aviso_refresco in x[1] for x in r)
+                     and (n == 540 or r[1][3] == n))
+        r = responder(0x1017, b"", 541)
+        datos_lobby = next(x[1] for x in r if x[0] == 0x1018)
+        total = struct.unpack_from("<I", datos_lobby, 3)[0]
+        registros = list(struct.iter_unpack("<IIBB", datos_lobby[16:16 + 10 * total]))
+        chequear("0x1018 publica todas las stages desbloqueadas con la marca de completadas",
+                 registros == [(0, esc, 1, 1) for esc in sorted(ESCENARIOS)]
+                 and any(" · /desbloquear Aventurero · " in linea for linea in logs_gm))
+        cuenta = ASIGNADAS.pop(541)
+        try:
+            r = responder(0x100D, _chat("/desbloquear Reserva"), 540)
+            with open(ruta_cuenta(cuenta), encoding="utf-8") as archivo:
+                datos = json.load(archivo)
+            chequear("/desbloquear también guarda al personaje desconectado sin seleccionarlo",
+                     [x[0] for x in r] == [0x1005] and datos["activo"] == 0
+                     and datos["pjs"][1]["terminadas"] == sorted(ESCENARIOS))
+        finally:
+            ASIGNADAS[541] = cuenta
+    finally:
+        config.GM_CUENTAS = gm_antes
+        config.GM_EN_VIVO = gm_en_vivo_antes
+        config.RELAY_IP = relay_antes
+        salas.log_gm, red.log = log_antes_gm, log_antes_red
+        for c in (501, 502, 505, 506, 510, 511, 512, 520, 521, 522, 530, 531, 532, 540, 541):
+            cerrada(c)
+        VIVO.__dict__.setdefault("DESCONECTADAS", set()).clear()
 
 
 def pruebas_panel(chequear):
@@ -2563,7 +3369,12 @@ def pruebas_messenger(chequear):
     r = responder(0x100D, chat_("/opciones"), 301)
     chequear("botón Options (/opciones) → un aviso, sólo al que lo pulsó",
              any("Opciones" in t for t in textos(r, 301)) and not textos(r, 302))
-    r = responder(0x100D, chat_("/oro 5"), 301)
+    gm_antes = config.GM_CUENTAS
+    config.GM_CUENTAS = nom_a
+    try:
+        r = responder(0x100D, chat_("/oro 5"), 301)
+    finally:
+        config.GM_CUENTAS = gm_antes
     chequear("★ el revés: los comandos GM siguen andando (/oro no es del messenger)",
              any("Oro actualizado" in t for t in textos([x + (301,) if len(x) == 3 else x for x in r], 301)))
     r = responder(0x1017, b"", 302)
